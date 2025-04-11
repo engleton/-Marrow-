@@ -1,0 +1,1341 @@
+# --- Main Bot Script: hecate_bot.py ---
+
+import platform
+import random
+import datetime
+import os
+import logging
+import subprocess
+import sys
+import asyncio
+import aiohttp # Keep import - might be useful later, low overhead
+
+# --- Required Imports ---
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+from discord.ext.commands import Context
+from dotenv import load_dotenv
+
+# --- Music Cog Imports ---
+import requests
+import yt_dlp
+
+# --- Gemini AI Import ---
+import google.generativeai as genai
+
+# --- Load Environment Variables ---
+load_dotenv()
+TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+BOT_PREFIX = os.getenv("BOT_PREFIX", "!")
+YOUR_CLIENT_ID = os.getenv("DISCORD_CLIENT_ID", "YOUR_CLIENT_ID_HERE")
+SPOTIFY_CLIENT_ID = os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = os.getenv("SPOTIFY_CLIENT_SECRET")
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+try:
+    raw_auth_id = os.getenv("AUTHORIZED_USER_ID")
+    AUTHORIZED_USER_ID = int(raw_auth_id) if raw_auth_id else None # None if not set
+except ValueError:
+    print("WARNING: AUTHORIZED_USER_ID in .env is not a valid integer. Owner/Music commands may not work as expected.")
+    AUTHORIZED_USER_ID = None # Treat invalid as not set
+
+# --- Fatal Error/Warning Checks ---
+if not TOKEN: print("FATAL ERROR: DISCORD_BOT_TOKEN not set."); sys.exit(1)
+if not YOUR_CLIENT_ID or YOUR_CLIENT_ID == "YOUR_CLIENT_ID_HERE": print("WARNING: DISCORD_CLIENT_ID not set."); YOUR_CLIENT_ID = "0" # Assign default to avoid error later
+if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET: print("WARNING: Spotify credentials not set. Spotify features may fail.")
+if not AUTHORIZED_USER_ID: print("WARNING: AUTHORIZED_USER_ID not set. Owner/Music commands may be restricted or unusable.")
+if not GOOGLE_API_KEY: print("WARNING: GOOGLE_API_KEY not set. Gemini features disabled.")
+
+# --- MacGruger Configuration ---
+MACGRUGER_DISCORD_BOTS_DIR = os.path.expanduser("~/Library/MacGruger/DiscordBots")
+MACGRUGER_PROMPTS_BASE_PATH = "/Users/claytonwade/Documents/DiscordMain/Prompts/Awesome_GPT_Super_Prompting/" # Updated Path
+
+# --- Setup Logging ---
+log_formatter = logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s')
+log_file_handler = logging.FileHandler(filename='discord_bot.log', encoding='utf-8', mode='w')
+log_file_handler.setFormatter(log_formatter)
+log_console_handler = logging.StreamHandler()
+log_console_handler.setFormatter(log_formatter)
+# Configure root logger to add handlers
+logging.basicConfig(level=logging.INFO, handlers=[log_file_handler, log_console_handler])
+discord_logger = logging.getLogger('discord')
+discord_logger.setLevel(logging.INFO)
+bot_logger = logging.getLogger('HecateBot') # General Bot Logger
+bot_logger.setLevel(logging.INFO)
+
+
+# --- Configure Google AI ---
+if GOOGLE_API_KEY:
+    try:
+        genai.configure(api_key=GOOGLE_API_KEY)
+        bot_logger.info("Google AI SDK configured successfully.")
+    except Exception as e:
+         bot_logger.error(f"Failed to configure Google AI SDK: {e}")
+         GOOGLE_API_KEY = None # Signal Gemini is unavailable
+
+# --- Define Intents ---
+intents = discord.Intents.default(); intents.message_content = True; intents.members = True; intents.guilds = True; intents.voice_states = True
+
+# --- Instantiate Bot ---
+bot = commands.Bot(command_prefix=BOT_PREFIX, intents=intents, help_command=None)
+bot.bot_prefix = BOT_PREFIX
+MUSIC_PERMISSIONS = 326424916992 # Includes Voice perms
+# Ensure Client ID is integer for URL generation
+try: client_id_int = int(YOUR_CLIENT_ID)
+except ValueError: client_id_int = 0; bot_logger.error("Invalid DISCORD_CLIENT_ID format, using 0.")
+bot.invite_link = discord.utils.oauth_url(client_id_int, permissions=discord.Permissions(permissions=MUSIC_PERMISSIONS), scopes=("bot", "applications.commands"))
+
+# --- Cog Definition: Hecate (General, MacGruger, AI Commands) ---
+class FeedbackForm(discord.ui.Modal, title="Feedback"):
+    feedback = discord.ui.TextInput(label="What do you think about this bot?", style=discord.TextStyle.long, placeholder="Type here...", required=True, max_length=256)
+    async def on_submit(self, i: discord.Interaction): self.interaction=i; self.answer=str(self.feedback.value); self.stop() # Use .value
+
+class Hecate(commands.Cog, name="hecate"):
+    def __init__(self, bot_instance: commands.Bot) -> None:
+        self.bot = bot_instance
+        self.logger = logging.getLogger('HecateCog')
+        self.logger.setLevel(logging.INFO)
+        global log_file_handler, log_console_handler
+        if log_file_handler not in self.logger.handlers: self.logger.addHandler(log_file_handler)
+        if log_console_handler not in self.logger.handlers: self.logger.addHandler(log_console_handler)
+        self.logger.propagate = False
+
+        self.analysis_file1 = "data_to_analyze.txt"
+        self.analysis_file2 = "gemini jb.txt"
+        # Gemini Model Init
+        self.gemini_model = None
+        if GOOGLE_API_KEY:
+            try: self.gemini_model = genai.GenerativeModel('gemini-pro'); self.logger.info("Initialized Gemini Pro model.")
+            except Exception as e: self.logger.error(f"Failed to initialize Gemini model: {e}")
+        else: self.logger.warning("Gemini features disabled (missing API key).")
+        # MacGruger Dir Checks
+        try:
+            os.makedirs(MACGRUGER_DISCORD_BOTS_DIR, exist_ok=True); self.logger.info(f"Checked MacGruger bots dir: {MACGRUGER_DISCORD_BOTS_DIR}")
+            if not os.path.isdir(MACGRUGER_PROMPTS_BASE_PATH): self.logger.warning(f"MacGruger Prompts Base path not found: {MACGRUGER_PROMPTS_BASE_PATH}")
+        except OSError as e: self.logger.error(f"Error creating MacGruger dir {MACGRUGER_DISCORD_BOTS_DIR}: {e}")
+        # Context Menus
+        self.context_menu_user = app_commands.ContextMenu(name="Grab ID", callback=self.grab_id); self.bot.tree.add_command(self.context_menu_user)
+        self.context_menu_message = app_commands.ContextMenu(name="Remove spoilers", callback=self.remove_spoilers); self.bot.tree.add_command(self.context_menu_message)
+
+    # --- Helper Functions ---
+    async def _run_blocking_subprocess(self, command_args):
+        if not isinstance(command_args, list): self.logger.error(f"Subprocess helper received non-list: {command_args}"); raise TypeError("command_args must be a list")
+        try:
+            process = await asyncio.to_thread(subprocess.run, command_args, check=True, capture_output=True, text=True, timeout=120)
+            stdout_preview = (process.stdout[:1000] + '...' if len(process.stdout) > 1000 else process.stdout) or '(No output)'
+            return True, f"Command executed.\nOutput:\n```\n{stdout_preview}\n```"
+        except subprocess.CalledProcessError as e:
+            stderr_preview = (e.stderr[:1000] + '...' if len(e.stderr) > 1000 else e.stderr) or '(No error output)'
+            error_msg = f"Command failed (Code {e.returncode}).\nError:\n```\n{stderr_preview}\n```"; self.logger.error(f"Subprocess error for {' '.join(command_args)}: {error_msg}"); return False, error_msg
+        except subprocess.TimeoutExpired: error_msg = "Command timed out (120s)."; self.logger.error(f"Subprocess timeout: {' '.join(command_args)}"); return False, error_msg
+        except FileNotFoundError: error_msg = f"Error: Command '{command_args[0]}' not found."; self.logger.error(f"Subprocess FileNotFoundError: {command_args[0]}"); return False, error_msg
+        except Exception as e: error_msg = f"Unexpected subprocess error: {e}"; self.logger.exception(f"Unexpected error running subprocess {' '.join(command_args)}"); return False, error_msg
+
+    async def install_bot_internal(self, repo_url, bot_name):
+        self.logger.info(f"Install bot '{bot_name}' from '{repo_url}'")
+        bot_path = os.path.join(MACGRUGER_DISCORD_BOTS_DIR, bot_name)
+        if os.path.exists(bot_path) and os.listdir(bot_path): self.logger.warning(f"Install aborted: Dir '{bot_path}' exists and not empty."); return False, f"Error: Dir `{bot_name}` exists and not empty."
+        os.makedirs(os.path.dirname(bot_path), exist_ok=True); command = ["git", "clone", repo_url, bot_path]
+        success, message = await self._run_blocking_subprocess(command)
+        if success: self.logger.info(f"Installed bot '{bot_name}' to '{bot_path}'"); return True, f"Bot '{bot_name}' installed:\n`{bot_path}`"
+        else: self.logger.error(f"Failed install bot '{bot_name}': {message}"); return False, f"Error installing '{bot_name}': {message}"
+
+    async def download_github_file_internal(self, file_url, destination_path):
+        self.logger.info(f"Download '{file_url}' to '{destination_path}'")
+        safe_base_dir = os.path.abspath(MACGRUGER_DISCORD_BOTS_DIR); abs_destination = os.path.abspath(destination_path)
+        if os.path.commonpath([safe_base_dir]) != os.path.commonpath([safe_base_dir, abs_destination]): self.logger.warning(f"Path traversal blocked: {destination_path}"); return False, "Error: Invalid destination path."
+        os.makedirs(os.path.dirname(abs_destination), exist_ok=True); command = ["curl", "-sfL", file_url, "-o", abs_destination]
+        success, message = await self._run_blocking_subprocess(command)
+        if success: self.logger.info(f"Downloaded '{file_url}' to '{abs_destination}'"); return True, f"File downloaded:\n`{abs_destination}`"
+        else:
+            self.logger.error(f"Failed download '{file_url}': {message}")
+            if os.path.exists(abs_destination):
+                 try: os.remove(abs_destination); self.logger.info(f"Removed partial dl: {abs_destination}")
+                 except OSError as rm_err: self.logger.warning(f"Could not remove partial dl {abs_destination}: {rm_err}")
+            return False, f"Error downloading: {message}"
+
+    def ask_awesome_gpt_internal(self, query=None, use_keyword=False):
+        base_prompt_path = MACGRUGER_PROMPTS_BASE_PATH; self.logger.info(f"Fetching prompt from '{base_prompt_path}'. Q:'{query}', KW:{use_keyword}")
+        if not os.path.isdir(base_prompt_path): self.logger.error(f"Prompt base path not found: {base_prompt_path}"); return f"Error: Prompt directory missing (`{base_prompt_path}`)."
+        all_md_files = [];
+        try:
+            for dirpath, dirnames, filenames in os.walk(base_prompt_path):
+                dirnames[:] = [d for d in dirnames if not d.startswith('.')];
+                for filename in filenames:
+                    if filename.endswith(".md"): full_path = os.path.join(dirpath, filename); relative_path = os.path.relpath(full_path, base_prompt_path); all_md_files.append({"full_path": full_path, "filename": filename, "relative_path": relative_path})
+        except OSError as e: self.logger.error(f"Error walking prompt dir {base_prompt_path}: {e}"); return f"Error accessing prompt dir: {e}"
+        if not all_md_files: self.logger.warning(f"No '.md' files found in {base_prompt_path}"); return f"No prompt files (.md) found in `{base_prompt_path}`."
+        chosen_file_info = None; target_files = all_md_files
+        if use_keyword and query:
+            matching_files = [f for f in all_md_files if query.lower() in f['filename'].lower()]
+            if matching_files: target_files = matching_files; self.logger.info(f"Found {len(matching_files)} matching '{query}'.")
+            else: self.logger.info(f"No prompts match keyword '{query}'."); return f"No prompts found matching keyword: `{query}`."
+        if not target_files: self.logger.error("Logical error: target_files became empty"); return "Error selecting prompt file (no matches?)."
+        chosen_file_info = random.choice(target_files); self.logger.info(f"Selected prompt: {chosen_file_info['relative_path']}")
+        if chosen_file_info:
+            try:
+                with open(chosen_file_info['full_path'], 'r', encoding='utf-8') as f: prompt = f.read()
+                self.logger.info(f"Read prompt from {chosen_file_info['full_path']}")
+                prompt_snip = prompt[:1800] + "\n... (prompt truncated)" if len(prompt) > 1800 else prompt
+                return f"**Prompt:** `{chosen_file_info['relative_path']}`\n```md\n{prompt_snip}\n```"
+            except Exception as e: self.logger.exception(f"Error reading prompt file {chosen_file_info['full_path']}"); return f"Error reading `{chosen_file_info['relative_path']}`: {e}"
+        else: self.logger.error("Logical error: chosen_file_info is None"); return "Error selecting prompt."
+
+    # --- Context Menus ---
+    async def remove_spoilers(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        spoiler_attachment=None; spoiler_attachment_url=None
+        for a in message.attachments:
+            if a.is_spoiler(): spoiler_attachment=a; spoiler_attachment_url=a.url; break
+        embed = discord.Embed(title="Message without spoilers", description=message.content.replace("||",""), color=0x9B59B6)
+        if spoiler_attachment and spoiler_attachment_url: embed.set_image(url=spoiler_attachment_url)
+        try: await interaction.response.send_message(embed=embed, ephemeral=True)
+        except discord.HTTPException as e: self.logger.error(f"Failed spoiler removal msg: {e}")
+
+    async def grab_id(self, interaction: discord.Interaction, user: discord.User) -> None:
+        embed = discord.Embed(description=f"ID of {user.mention}: `{user.id}`.", color=0x9B59B6)
+        try: await interaction.response.send_message(embed=embed, ephemeral=True)
+        except discord.HTTPException as e: self.logger.error(f"Failed grab ID msg: {e}")
+
+    # --- Hybrid Commands ---
+    @commands.hybrid_command(name="help", description="List commands.")
+    async def help(self, context: Context) -> None:
+        embed = discord.Embed(title="Hecate Bot Help", description="List of available commands:", color=0x9B59B6)
+        is_owner = await self.bot.is_owner(context.author)
+        for cog_name in self.bot.cogs:
+            cog = self.bot.get_cog(cog_name)
+            if not cog: continue
+            cog_commands = cog.get_commands()
+            data = []
+            for command in cog_commands:
+                if isinstance(command, (app_commands.ContextMenu)): continue
+                try:
+                    can_run = await command.can_run(context)
+                    is_owner_cmd = any(isinstance(check, type(commands.is_owner())) for check in command.checks)
+                    if (command.hidden or is_owner_cmd) and not is_owner: continue
+                    if not can_run: continue
+                except commands.CommandError: continue
+                desc = command.short_doc or command.description or "No description"
+                desc_line = desc.partition("\n")[0]
+                cmd_mention = f"`/{command.name}`" if isinstance(command, (commands.HybridCommand, app_commands.Command)) else f"`{self.bot.bot_prefix}{command.name}`"
+                data.append(f"{cmd_mention} - {desc_line}")
+            if data:
+                help_text = "\n".join(sorted(data))
+                embed.add_field(name=cog_name.capitalize(), value=help_text, inline=False)
+        try: await context.send(embed=embed)
+        except discord.HTTPException as e: self.logger.error(f"Failed help msg: {e}")
+
+    @commands.hybrid_command(name="botinfo", description="Get bot info.")
+    async def botinfo(self, context: Context) -> None:
+        embed = discord.Embed(description="Based on [Krypton's](https://krypton.ninja) template", color=0x9B59B6)
+        try: app_info = await self.bot.application_info(); owner = app_info.owner
+        except discord.HTTPException: owner = "Unavailable"
+        embed.set_author(name="Bot Information")
+        embed.add_field(name="Owner:", value=f"{owner}", inline=True)
+        embed.add_field(name="Python Ver:", value=f"{platform.python_version()}", inline=True)
+        embed.add_field(name="discord.py Ver:", value=f"{discord.__version__}", inline=True)
+        embed.add_field(name="Prefix:", value=f"`/` or `{self.bot.bot_prefix}`", inline=False)
+        embed.add_field(name="Ping:", value=f"{round(self.bot.latency * 1000)}ms", inline=True)
+        embed.add_field(name="Servers:", value=f"{len(self.bot.guilds)}", inline=True)
+        embed.set_footer(text=f"Requested by {context.author}")
+        try: await context.send(embed=embed)
+        except discord.HTTPException as e: self.logger.error(f"Failed botinfo msg: {e}")
+
+    @commands.hybrid_command(name="serverinfo", description="Get server info.")
+    async def serverinfo(self, context: Context) -> None:
+        if not context.guild: await context.send("Command unavailable in DMs."); return
+        guild = context.guild; roles = [r.mention for r in reversed(guild.roles) if r.name != "@everyone"]; num_roles=len(roles)
+        if num_roles > 35: roles = roles[:35] + [f" (+{num_roles - 35} more)"]
+        roles_str = ", ".join(roles) if roles else "None"; roles_str = roles_str[:1020] + "..." if len(roles_str) > 1020 else roles_str
+        embed = discord.Embed(title=f"**Server Info: {guild.name}**", color=0x9B59B6)
+        if guild.icon: embed.set_thumbnail(url=guild.icon.url)
+        embed.add_field(name="ID", value=guild.id, inline=True); embed.add_field(name="Owner", value=guild.owner.mention if guild.owner else "Unknown", inline=True)
+        embed.add_field(name="Created", value=discord.utils.format_dt(guild.created_at, style='F'), inline=True)
+        embed.add_field(name="Members", value=f"{guild.member_count}", inline=True); embed.add_field(name="Txt Channels", value=f"{len(guild.text_channels)}", inline=True)
+        embed.add_field(name="Voice Channels", value=f"{len(guild.voice_channels)}", inline=True)
+        embed.add_field(name=f"Roles ({len(guild.roles)})", value=roles_str, inline=False)
+        embed.set_footer(text=f"Requested by {context.author}", icon_url=context.author.display_avatar.url)
+        try: await context.send(embed=embed)
+        except discord.HTTPException as e: self.logger.error(f"Failed serverinfo msg: {e}")
+
+    @commands.hybrid_command(name="ping", description="Check bot latency.")
+    async def ping(self, context: Context) -> None:
+        latency = round(self.bot.latency * 1000)
+        embed = discord.Embed(title="🏓 Pong!", description=f"Latency: {latency}ms.", color=0x9B59B6 if latency < 300 else 0xE02B2B)
+        try: await context.send(embed=embed)
+        except discord.HTTPException as e: self.logger.error(f"Failed ping msg: {e}")
+
+    @commands.hybrid_command(name="invite", description="Get bot invite link.")
+    async def invite(self, context: Context) -> None:
+        embed = discord.Embed(description=f"Invite me by clicking [here]({self.bot.invite_link}).", color=0x71368A)
+        try: await context.author.send(embed=embed); await context.send("Invite link sent via DM!", ephemeral=True)
+        except (discord.Forbidden, discord.HTTPException):
+            try: await context.send(embed=embed)
+            except discord.HTTPException as e: self.logger.error(f"Failed invite msg fallback: {e}")
+        except Exception as e: self.logger.exception(f"Error sending invite: {e}")
+
+    @commands.hybrid_command(name="server", description="Get support server link.")
+    async def server(self, context: Context) -> None:
+        support_server_link = "https://discord.gg/mTBrXyWxAF" # Example
+        embed = discord.Embed(description=f"Join the support server [here]({support_server_link}).", color=0x71368A)
+        try: await context.author.send(embed=embed); await context.send("Support server link sent via DM!", ephemeral=True)
+        except (discord.Forbidden, discord.HTTPException):
+            try: await context.send(embed=embed)
+            except discord.HTTPException as e: self.logger.error(f"Failed server link fallback: {e}")
+        except Exception as e: self.logger.exception(f"Error sending server link: {e}")
+
+    # --- 8BALL AND BITCOIN REMOVED ---
+
+    @commands.hybrid_command(name="userinfo", description="Get user info.")
+    @app_commands.describe(user="User?")
+    async def userinfo(self, context: Context, user: discord.Member = None) -> None:
+        target_user = user or context.author
+        if isinstance(target_user, discord.User) and context.guild: member = context.guild.get_member(target_user.id); target_user = member if member else target_user
+        elif not context.guild and isinstance(target_user, discord.User): await context.send("Server info unavailable in DMs."); return
+        if not isinstance(target_user, discord.Member) and context.guild: await context.send("Cannot get full server info (user might not be in server)."); return
+        embed = discord.Embed(title=f"User Info: {target_user.display_name}", color=target_user.color if isinstance(target_user, discord.Member) else 0x9B59B6).set_thumbnail(url=target_user.display_avatar.url)
+        embed.add_field(name="Username", value=f"{target_user}", inline=True); embed.add_field(name="ID", value=target_user.id, inline=True)
+        if isinstance(target_user, discord.Member): embed.add_field(name="Status", value=str(target_user.status).title(), inline=True)
+        embed.add_field(name="Acc Created", value=discord.utils.format_dt(target_user.created_at, style='F'), inline=False)
+        if isinstance(target_user, discord.Member):
+             embed.add_field(name="Joined Server", value=discord.utils.format_dt(target_user.joined_at, style='F') if target_user.joined_at else 'Unknown', inline=False)
+             roles = [r.mention for r in reversed(target_user.roles) if r.name != "@everyone"]; num_roles = len(roles)
+             roles_str = (", ".join(roles[:35]) + (f" (+{num_roles-35})" if num_roles>35 else "")) if roles else "None"; roles_str = roles_str[:1020] + "..." if len(roles_str) > 1020 else roles_str
+             embed.add_field(name=f"Roles ({num_roles})", value=roles_str, inline=False)
+             embed.add_field(name="Highest Role", value=target_user.top_role.mention if target_user.top_role.name != "@everyone" else "None", inline=True)
+             embed.add_field(name="Nickname", value=target_user.nick or "None", inline=True)
+        embed.set_footer(text=f"Requested by {context.author}", icon_url=context.author.display_avatar.url)
+        try: await context.send(embed=embed)
+        except discord.HTTPException as e: self.logger.error(f"Failed userinfo msg: {e}")
+
+    @commands.hybrid_command(name="avatar", description="Display avatar.")
+    @app_commands.describe(user="User?")
+    async def avatar(self, context: Context, user: discord.User = None) -> None:
+        target_user = user or context.author
+        embed = discord.Embed(title=f"{target_user.display_name}'s Avatar", color=0x9B59B6).set_image(url=target_user.display_avatar.url)
+        try: await context.send(embed=embed)
+        except discord.HTTPException as e: self.logger.error(f"Failed avatar msg: {e}")
+
+    @commands.hybrid_command(name="choose", description="Choose from options.")
+    @app_commands.describe(options="Options?")
+    async def choose(self, context: Context, *, options: str) -> None:
+        choices = []; temp_split = [opt.strip() for opt in options.split(' or ') if opt.strip()];
+        for part in temp_split: choices.extend([c.strip() for c in part.split(',') if c.strip()])
+        if not choices: await context.send("Provide options (comma or 'or' separated)."); return
+        if len(choices) == 1: await context.send(f"Only one option: `{choices[0]}`"); return
+        chosen = random.choice(choices); embed = discord.Embed(title="Decision Made", color=0x9B59B6)
+        embed.add_field(name="Options", value=f"`{', '.join(choices)}`", inline=False); embed.add_field(name="Choice", value=f"**{chosen}**", inline=False)
+        try: await context.send(embed=embed)
+        except discord.HTTPException as e: self.logger.error(f"Failed choose msg: {e}")
+
+    @commands.hybrid_command(name="poll", description="Create Yes/No/Shrug poll.")
+    @app_commands.describe(question="Question?")
+    async def poll(self, context: Context, *, question: str) -> None:
+        if not question: await context.send("Provide question."); return
+        embed = discord.Embed(title="📊 Poll Time!", description=f"**{question}**", color=0x9B59B6).set_footer(text=f"Poll by {context.author}")
+        try:
+            await context.defer()
+            poll_message = await context.send(embed=embed)
+            await poll_message.add_reaction("👍"); await poll_message.add_reaction("👎"); await poll_message.add_reaction("🤷")
+        except discord.Forbidden: self.logger.warning(f"No reaction perm in {context.channel.id}"); await context.followup.send("I lack permission to add reactions.", ephemeral=True)
+        except discord.HTTPException as e: self.logger.error(f"Failed poll creation: {e}"); await context.followup.send("Error creating poll.", ephemeral=True)
+
+    @commands.hybrid_command(name="analyze_system_files", desc="Analyze config files.")
+    @commands.is_owner()
+    async def analyze_system_files(self, context: Context) -> None:
+        """ Reads configured files. Owner only. """
+        files_to_check = [self.analysis_file1, self.analysis_file2]; errors = []; success_files = []
+        for fp in files_to_check:
+            try:
+                if not os.path.exists(fp): errors.append(f"Not found: `{fp}`."); continue
+                with open(fp, 'r', encoding='utf-8') as f: f.read(10); success_files.append(f"`{fp}`")
+            except Exception as e: errors.append(f"Error `{fp}`: {e}"); self.logger.error(f"Error analyzing {fp}: {e}")
+        if not errors: await context.send(f"System files OK ({', '.join(success_files)}). hello world")
+        else: msg = "Analysis Errors:\n- " + "\n- ".join(errors); msg += f"\nOK: {', '.join(success_files)}" if success_files else ""; await context.send(msg[:1990])
+
+    @commands.hybrid_command(name="install_bot", desc="Install bot via Git.")
+    @app_commands.describe(repo_url="HTTPS URL", bot_name="Dir name")
+    @commands.is_owner()
+    async def install_bot_cmd(self, context: Context, repo_url: str, bot_name: str):
+        if not repo_url.startswith("https://") or not repo_url.endswith(".git"): await context.send("Use HTTPS Git URL ending `.git`.", ephemeral=True); return
+        if not bot_name or any(c in bot_name for c in r'/\.'): await context.send("Invalid bot name.", ephemeral=True); return
+        await context.defer(ephemeral=True); success, message = await self.install_bot_internal(repo_url, bot_name); await context.followup.send(message, ephemeral=True)
+
+    @commands.hybrid_command(name="download_file", desc="Download file.")
+    @app_commands.describe(file_url="URL", dest_subpath="Rel path")
+    @commands.is_owner()
+    async def download_file_cmd(self, context: Context, file_url: str, dest_subpath: str):
+        if not file_url.startswith(("http://", "https://")): await context.send("Use HTTP/HTTPS URL.", ephemeral=True); return
+        if not dest_subpath or ".." in dest_subpath: await context.send("Invalid relative path.", ephemeral=True); return
+        full_dest_path = os.path.join(MACGRUGER_DISCORD_BOTS_DIR, dest_subpath); await context.defer(ephemeral=True)
+        success, message = await self.download_github_file_internal(file_url, full_dest_path); await context.followup.send(message, ephemeral=True)
+
+    @commands.hybrid_command(name="ask_gpt", desc="Get random prompt.")
+    @app_commands.describe(opt_query="Keywords?")
+    async def ask_gpt_cmd(self, context: Context, *, opt_query: str = None):
+        await context.defer(); response = self.ask_awesome_gpt_internal(query=opt_query, use_keyword=bool(opt_query));
+        try:
+           await context.followup.send(response)
+        except discord.HTTPException as e:
+             if e.code == 50035: await context.followup.send("Error: Prompt too long.")
+             else:
+         self.logger.warning(f"Failed ask_gpt send: {e}")
+        await context.followup.send("Error sending response.")
+
+    @commands.hybrid_command(name="super_prompt", desc="Get prompt by keyword.")
+    @app_commands.describe(keyword="Filename keyword")
+    async def super_prompt_cmd(self, context: Context, keyword: str):
+        if not keyword: await context.send("Provide keyword.", ephemeral=True);
+ return
+        await context.defer(); response =
+ self.ask_awesome_gpt_internal(query=keyword, use_keyword=True)
+        try:
+ await context.followup.send(response)
+        except discord.HTTPException as e:
+             if e.code == 50035: await context.followup.send("Error: Prompt too long.")
+             else: self.logger.warning(f"Failed super_prompt send: {e}"); await context.followup.send("Error sending response.")
+
+    @app_commands.command(name="feedback", description="Submit feedback.")
+    async def feedback(self, interaction: discord.Interaction) -> None:
+        form = FeedbackForm(); await interaction.response.send_modal(form); timed_out = await form.wait()
+        if timed_out or not hasattr(form, 'interaction') or not form.interaction: self.logger.info(f"Feedback modal timeout/dismiss from {interaction.user}"); return
+        modal_i = form.interaction;
+        try: await modal_i.response.send_message(embed=discord.Embed(description="Feedback sent!", color=0x9B59B6), ephemeral=True)
+        except discord.HTTPException as e: self.logger.error(f"Failed feedback confirm: {e}")
+        try:
+            app_info = await self.bot.application_info(); owner = app_info.owner
+            if owner: await owner.send(embed=discord.Embed(title="Feedback Received", color=0x9B59B6, timestamp=discord.utils.utcnow(),
+                                                        description=f"**From:** {modal_i.user} (`{modal_i.user.id}`)\n**Server:** {modal_i.guild.name if modal_i.guild else 'DM'}\n**Channel:** {modal_i.channel.name if modal_i.channel else 'DM'}\n```\n{form.answer}\n```"))
+            else: self.logger.warning("Cannot determine app owner.")
+        except Exception as e: self.logger.exception(f"Failed sending feedback DM: {e}")
+
+    # --- Gemini AI Command ---
+    # --- Gemini AI Command ---
+    @commands.hybrid_command(name="gemini", description="Ask the Gemini AI model.")
+    @app_commands.describe(prompt="Your prompt/question for Gemini.")
+    async def gemini(self, context: Context, *, prompt: str):
+        """Sends a prompt to the configured Google Gemini model."""
+        if not self.gemini_model: return await context.send("❌ Gemini disabled.", ephemeral=True)
+        if not prompt: return await context.send("⚠️ Provide prompt for Gemini.", ephemeral=True)
+        await context.defer()
+        try:
+            self.logger.info(f"[Gemini] Prompt from {context.author}: '{prompt[:50]}...'")
+            # Ensure generate_content_async is used for non-blocking API call
+            response = await self.gemini_model.generate_content_async(prompt)
+
+            # Improved safety and response checking
+            if not response.candidates or not hasattr(response.candidates[0], 'content') or not hasattr(response.candidates[0].content,'parts') or not response.text:
+                safety_info = ""
+                if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
+                     safety_info = f" (Reason: {response.prompt_feedback.block_reason.name})" # Use name attribute
+                self.logger.warning(f"[Gemini] Response blocked/empty for '{prompt[:50]}' {safety_info}")
+                await context.followup.send(f"⚠️ Gemini didn't respond.{safety_info}")
+                return
+
+            result_text = response.text; self.logger.info(f"[Gemini] Response: '{result_text[:50]}...'")
+            embed = discord.Embed(title="✨ Gemini Response", description=result_text[:4000], color=0x4285F4).set_footer(text=f"Prompt by {context.author.display_name}")
+
+            # Send response (handling potential length issues)
+            if len(result_text) <= 4000:
+                await context.followup.send(embed=embed)
+            else:
+                await context.followup.send(embed=embed) # Send first part in embed
+                remaining = result_text[4000:]
+                # Send remaining parts in chunks
+                for i in range(0, len(remaining), 1990):
+                     chunk = remaining[i:i+1990]
+                     await context.send(f"```\n{chunk}\n```") # Send subsequent parts as plain text blocks
+
+        except Exception as e:
+            self.logger.exception(f"[Gemini] API Error for '{prompt[:50]}...'")
+            await context.followup.send(f"❌ Gemini Error: {e}")
+
+    # --- Eden Hints Command Group ---
+    @commands.hybrid_group(name="edenhints", description="Hints and specific prompts.")
+    async def edenhints(self, context: Context):
+        """Base command for Eden hints."""
+        # Send help if invoked without subcommand
+        if context.invoked_subcommand is None:
+            await context.send_help(context.command)
+
+    @edenhints.command(name="suggestions", description="Example prompt suggestions.")
+    async def suggestions(self, context: Context):
+        """Provides some example prompt ideas."""
+        embed = discord.Embed(title="💡 Eden Hints - Suggestions", color=0xBEBEFE)
+        suggestions_list = [
+            "`/gemini Explain recursion simply.`",
+            "`/gemini Write a short poem about a rainy day.`",
+            "`/gemini What are the pros and cons of using Node.js vs Python for web development?`",
+            "`/gemini Suggest 5 healthy breakfast ideas.`",
+            "`/gemini Summarize the main points of the theory of relativity.`",
+            "`/edenhints prompts eden11` - Run the specific Eden11 system prompt.",
+        ]
+        embed.description = "\n".join(suggestions_list)
+        await context.send(embed=embed)
+
+    @edenhints.group(name="prompts", description="Run specific stored prompts.")
+    async def prompts(self, context: Context):
+        """Base command for specific prompts."""
+        if context.invoked_subcommand is None:
+            await context.send_help(context.command)
+
+    @prompts.command(name="eden11", description="Runs the 'gemini jb.txt' prompt (Owner Only).")
+    @commands.is_owner() # Restrict this specific prompt command to the owner
+    async def eden11_prompt(self, context: Context):
+        """Loads and runs the content of 'gemini jb.txt' as a prompt."""
+        if not self.gemini_model:
+            return await context.send("❌ Gemini disabled.", ephemeral=True)
+
+        file_path = self.analysis_file2 # Use the filename stored in __init__
+        await context.defer(ephemeral=True) # Defer response, make it ephemeral
+
+        try:
+            if not os.path.exists(file_path):
+                self.logger.error(f"[EdenHints] File missing: {file_path}")
+                return await context.followup.send(f"❌ File missing: `{file_path}`.", ephemeral=True)
+
+            with open(file_path, 'r', encoding='utf-8') as f:
+                eden_prompt = f.read()
+
+            if not eden_prompt:
+                 self.logger.warning(f"[EdenHints] File empty: {file_path}")
+                 return await context.followup.send(f"⚠️ File empty: `{file_path}`.", ephemeral=True)
+
+            self.logger.info(f"[EdenHints] Sending prompt from {file_path} by {context.author}")
+
+            # Send the file content as the prompt to Gemini
+            response = await self.gemini_model.generate_content_async(eden_prompt)
+
+            # Check for safety blocks or empty response
+            if not response.candidates or not hasattr(response.candidates[0], 'content') or not hasattr(response.candidates[0].content,'parts') or not response.text:
+                safety_info = ""
+                if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
+                     safety_info = f" (Reason: {response.prompt_feedback.block_reason.name})"
+                self.logger.warning(f"[EdenHints] Response blocked/empty {safety_info}")
+                await context.followup.send(f"⚠️ Gemini didn't respond.{safety_info}")
+                return
+
+            result_text = response.text
+            self.logger.info(f"[EdenHints] Response: '{result_text[:50]}...'")
+
+            # Format the response showing both original and result
+            embed = discord.Embed(title="✨ Eden11 Prompt Result", color=0x4285F4)
+            # Show snippets, limit lengths
+            original_snippet = eden_prompt[:1000] + "..." if len(eden_prompt) > 1000 else eden_prompt
+            response_snippet = result_text[:1000] + "..." if len(result_text) > 1000 else result_text
+            embed.add_field(name=f"Original Prompt (`{file_path}`)", value=f"```\n{original_snippet}\n```", inline=False)
+            embed.add_field(name="Gemini Response", value=response_snippet, inline=False)
+            embed.set_footer(text=f"Triggered by {context.author.display_name}")
+
+            await context.followup.send(embed=embed, ephemeral=True) # Send result ephemerally
+
+        except FileNotFoundError: # Specific handling if file disappears between check and open
+            self.logger.error(f"[EdenHints] File not found error for {file_path}")
+            await context.followup.send(f"❌ Error: File `{file_path}` not found.", ephemeral=True)
+        except IOError as e:
+            self.logger.error(f"[EdenHints] Error reading file {file_path}: {e}")
+            await context.followup.send(f"❌ Error reading prompt file `{file_path}`.", ephemeral=True)
+        except Exception as e:
+            self.logger.exception(f"[EdenHints] Error processing {file_path}")
+            await context.followup.send(f"❌ Error processing prompt: {e}", ephemeral=True)
+# --- End of Hecate Cog Definition ---
+# --- Cog Definition: MusicCog ---
+# yt-dlp options
+YDL_OPTS = { 'format': 'bestaudio/best', 'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s', 'restrictfilenames': True, 'noplaylist': True, 'nocheckcertificate': True, 'ignoreerrors': False, 'logtostderr': False, 'quiet': True, 'no_warnings': True, 'default_search': 'ytsearch1', 'source_address': '0.0.0.0', 'extract_flat': 'discard_in_playlist', 'lazy_playlist': True }
+# FFmpeg options 
+FFMPEG_OPTIONS = { 'options': '-vn', "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 10M -probesize 10M" }
+
+class MusicCog(commands.Cog, name="music"):
+    def __init__(self, bot_instance: commands.Bot):
+        self.bot = bot_instance
+        self.logger = logging.getLogger('MusicCog'); self.logger.setLevel(logging.INFO)
+        global log_file_handler, log_console_handler
+        if log_file_handler not in self.logger.handlers: self.logger.addHandler(log_file_handler)
+        if log_console_handler not in self.logger.handlers: self.logger.addHandler(log_console_handler)
+        self.logger.propagate = False
+        self.spotify_token = None; self.spotify_token_expiry = datetime.datetime.now(datetime.timezone.utc) # Use UTC
+        self.gif_list = ["https://media.giphy.com/media/26ufdipQqU2lhNA4g/giphy.gif", "https://media.giphy.com/media/l41lO3OQv0vP6xj8A/giphy.gif", "https://media.giphy.com/media/3orieVVSGK76O7fPHq/giphy.gif"]
+        self.current_gif_index = 0; self.gif_channel_id = None # <<< SET CHANNEL ID (int) FOR GIF UPDATES >>>
+        self.music_queues = {}; self.current_song = {}; self.voice_clients = {}; self.play_next_tasks = {}
+        self.logger.info("MusicCog __init__ completed.") # Logging init completion
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self.logger.info(f"{self.qualified_name} cog ready.")
+        # Start GIF task if configured
+        # if self.gif_channel_id and hasattr(self, 'gif_cycle_task') and not self.gif_cycle_task.is_running(): self.gif_cycle_task.start(); self.logger.info("Starting GIF task.")
+
+    def cog_unload(self):
+        # Cancel background tasks
+        if hasattr(self, 'gif_cycle_task') and self.gif_cycle_task.is_running(): self.gif_cycle_task.cancel()
+        for task in self.play_next_tasks.values():
+            if task and not task.done(): task.cancel()
+        # Disconnect VCs managed by this cog
+        async def cleanup_vcs():
+            self.logger.info(f"[{self.qualified_name}] Cleaning up VCs on unload...")
+            for guild_id, vc in list(self.voice_clients.items()): # Iterate over copy
+                if vc and vc.is_connected():
+                    try: await vc.disconnect(force=True)
+                    except Exception as e: self.logger.error(f"[{guild_id}] Error disconnecting on unload: {e}")
+            self.voice_clients.clear()
+            self.logger.info(f"[{self.qualified_name}] VCs cleaned up.")
+        # Ensure cleanup runs in the bot's event loop
+        if self.bot.loop.is_running():
+             asyncio.create_task(cleanup_vcs())
+        else: # Fallback if loop not running
+             try:
+                 asyncio.run(cleanup_vcs())
+             except RuntimeError:
+                 self.logger.warning("Event loop closed, cannot fully cleanup VCs on unload.")
+        self.logger.info(f"{self.qualified_name} cog unloaded.")
+
+    # --- Spotify Helpers ---
+    def _get_spotify_token(self):
+        if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET: self.logger.error("Spotify creds missing."); raise ValueError("Spotify credentials missing.")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if not self.spotify_token or now >= self.spotify_token_expiry:
+            self.logger.info("Refreshing Spotify token."); url = "https://accounts.spotify.com/api/token"
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}; data = { "grant_type": "client_credentials", "client_id": SPOTIFY_CLIENT_ID, "client_secret": SPOTIFY_CLIENT_SECRET }
+            try:
+                response = requests.post(url, headers=headers, data=data, timeout=10); response.raise_for_status(); token_data = response.json()
+                self.spotify_token = token_data["access_token"]; expires_in = token_data.get("expires_in", 3600)
+                self.spotify_token_expiry = now + datetime.timedelta(seconds=expires_in - 60); self.logger.info("Spotify token refreshed."); return self.spotify_token
+            except requests.exceptions.RequestException as e: self.logger.error(f"Spotify Auth Fail: {e}"); raise Exception(f"Spotify Auth Fail: {e}")
+            except Exception as e: self.logger.exception("Spotify token refresh error."); raise Exception(f"Spotify Auth Fail: {e}")
+        else: return self.spotify_token
+
+    def _get_playlist_tracks(self, playlist_id):
+        try:
+            token = self._get_spotify_token(); fields = "items(track(name,artists(name)))"; url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks?fields={fields}"
+            headers = {"Authorization": f"Bearer {token}"}; all_tracks = []; offset = 0; limit = 50
+            while True:
+                paginated_url = f"{url}&offset={offset}&limit={limit}"; response = requests.get(paginated_url, headers=headers, timeout=10); response.raise_for_status(); tracks_data = response.json()
+                items = tracks_data.get("items", []);
+                if not items: break
+                all_tracks.extend([f"{i['track']['name']} - {i['track']['artists'][0]['name']}" for i in items if i.get('track') and i['track'].get('name') and i['track'].get('artists')])
+                if len(items) < limit: break
+                offset += limit
+            self.logger.info(f"Fetched {len(all_tracks)} tracks from Spotify playlist {playlist_id}"); return all_tracks
+        except requests.exceptions.RequestException as e: self.logger.error(f"Failed getting playlist {playlist_id}: {e}"); raise Exception(f"HTTP error fetching playlist: {e}")
+        except Exception as e: self.logger.exception(f"Error getting playlist {playlist_id}"); raise Exception(f"Error processing playlist: {e}")
+
+    # --- Audio Extraction ---
+    async def _extract_audio_source(self, url, loop):
+        self.logger.info(f"Extracting source for: {url}")
+        try:
+            with yt_dlp.YoutubeDL(YDL_OPTS) as ydl: data = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+            if not data: raise ValueError("yt-dlp returned no data.")
+            entry_data = data['entries'][0] if 'entries' in data else data; stream_url = None
+            # Prioritize direct URL if available
+            if 'url' in entry_data: stream_url = entry_data['url']
+            elif 'formats' in entry_data:
+                 formats = entry_data.get('formats', []);
+                 # Find best audio-only if possible
+                 audio_formats = [f for f in formats if f.get('url') and f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+                 if audio_formats: stream_url = max(audio_formats, key=lambda f: f.get('abr', 0) or 0).get('url')
+                 else: # Fallback: Best format with audio
+                     audio_formats_any = [f for f in formats if f.get('url') and f.get('acodec') != 'none']
+                     if audio_formats_any: stream_url = max(audio_formats_any, key=lambda f: f.get('abr', 0) or 0).get('url'); self.logger.warning(f"Using non-optimal stream for {entry_data.get('title', url)}")
+            if not stream_url: self.logger.error(f"No stream URL found for {url}. Data: {data}"); raise ValueError("Could not find playable stream URL.")
+            title = entry_data.get('title', 'Unknown Title'); self.logger.info(f"Extracted source for '{title}'")
+            return stream_url, title
+        except yt_dlp.utils.DownloadError as e: self.logger.error(f"yt-dlp DL Error: {e}"); msg=str(e); raise ValueError(f"Extraction Error: {'Unsupported URL' if 'Unsupported URL' in msg else 'Video unavailable' if 'Video unavailable' in msg else e}")
+        except Exception as e: self.logger.exception(f"Extraction error for {url}"); raise ValueError(f"Extraction Error: {e}")
+
+    # --- GIF & Visualizer Stubs ---
+    def _get_next_gif(self):
+        """Cycles through the GIF list."""
+        if not self.gif_list:
+            self.logger.warning("GIF list is empty.")
+            return None
+        if self.current_gif_index >= len(self.gif_list):
+             self.current_gif_index = 0
+        gif_url = self.gif_list[self.current_gif_index]
+        self.current_gif_index = (self.current_gif_index + 1) % len(self.gif_list)
+        return gif_url
+
+    def _activate_visualizer(self):
+        """Placeholder for visualizer activation."""
+        self.logger.info("Visualizer activated (stub).")
+        return "Visualizer activated! (Stub)"
+
+    # --- Player Task & Callback ---
+    async def _player_task(self, ctx: Context):
+        guild_id = ctx.guild.id; self.play_next_tasks[guild_id] = asyncio.current_task(); self.logger.info(f"[{guild_id}] Player task started.")
+        try:
+            while True:
+                vc = self.voice_clients.get(guild_id)
+                if not vc or not vc.is_connected(): self.logger.warning(f"[{guild_id}] Player task exit: VC disconnected externally."); break
+                try: next_item = await asyncio.wait_for(self.music_queues[guild_id].get(), timeout=300.0) # 5 min timeout
+                except asyncio.TimeoutError: self.logger.info(f"[{guild_id}] Player task timeout."); break
+                except asyncio.CancelledError: self.logger.info(f"[{guild_id}] Player task cancelled."); break
+                except KeyError: self.logger.info(f"[{guild_id}] Player task stopping: Queue not found."); break
+
+                source_url, title, requester = next_item['source'], next_item['title'], next_item['requester']
+                self.current_song[guild_id] = next_item; self.logger.info(f"[{guild_id}] Playing: '{title}' req by {requester}")
+                if not vc.is_connected(): self.logger.warning(f"[{guild_id}] Disconnected before playing '{title}'."); self.music_queues[guild_id].task_done(); self.current_song.pop(guild_id, None); continue
+
+                try:
+                    player = discord.FFmpegPCMAudio(source_url, **FFMPEG_OPTIONS)
+                    # Ensure after callback runs in the correct loop and handles context safely
+                    def after_callback(error): self.bot.loop.call_soon_threadsafe(self._handle_after_play, ctx, error, title)
+                    vc.play(player, after=after_callback)
+                    # Send Now Playing message after starting playback
+                    try: await ctx.send(f"🎵 Now Playing: **{title}** (Req by {requester.mention})")
+                    except discord.HTTPException as send_err: self.logger.warning(f"[{guild_id}] Failed to send Now Playing message: {send_err}")
+                    # Wait using queue.join instead of sleep loop
+                    await self.music_queues[guild_id].join() # Wait until task_done called for this item
+
+                except discord.ClientException as ce: self.logger.error(f"[{guild_id}] ClientException during playback: {ce}"); await ctx.send(f"❌ Playback Error: {ce}"); self.music_queues[guild_id].task_done()
+                except Exception as e: self.logger.exception(f"[{guild_id}] Error during playback of '{title}'"); await ctx.send(f"❌ Error playing '{title}'."); self.music_queues[guild_id].task_done()
+                finally: self.current_song.pop(guild_id, None) # Clear current song after attempting/finishing play
+
+        except asyncio.CancelledError: self.logger.info(f"[{guild_id}] Player task cancelled.")
+        finally: # General task cleanup
+            self.logger.info(f"[{guild_id}] Player task cleanup.")
+            self.current_song.pop(guild_id, None)
+            if guild_id in self.play_next_tasks: del self.play_next_tasks[guild_id]
+            vc = self.voice_clients.get(guild_id)
+            if vc and vc.is_connected():
+                 self.logger.info(f"[{guild_id}] Disconnecting VC after player task ended naturally.")
+                 try: await vc.disconnect(force=True);
+                 except Exception as e: self.logger.error(f"[{guild_id}] Error disconnecting VC in cleanup: {e}")
+            if guild_id in self.voice_clients: del self.voice_clients[guild_id]
+
+    def _handle_after_play(self, ctx: Context, error: Exception | None, title: str):
+        """Callback run after vc.play finishes - MUST be threadsafe."""
+        guild_id = ctx.guild.id
+        log_func = self.logger.error if error else self.logger.info
+        log_func(f'[{guild_id}] {"Player error" if error else "Finished playing"} "{title}"' + (f": {error}" if error else "."))
+        queue = self.music_queues.get(guild_id)
+        if queue:
+            try: queue.task_done() # Signal that the item processing is done
+            except ValueError: pass
+            except Exception as e: self.logger.error(f"[{guild_id}] Error task_done: {e}")
+        # The player task is waiting on queue.join(), which task_done() unblocks
+
+    async def _ensure_voice_client(self, ctx: Context) -> discord.VoiceClient | None:
+        """Connects/moves VC if needed, returns VC object or None on failure."""
+        guild_id = ctx.guild.id
+        vc = self.voice_clients.get(guild_id)
+
+        if not ctx.author.voice:
+             await ctx.send("📢 Join a voice channel first.", ephemeral=True); return None
+        channel = ctx.author.voice.channel
+
+        if vc is None or not vc.is_connected():
+            self.logger.info(f"[{guild_id}] Connecting to VC: {channel.name}")
+            try: vc = await channel.connect(timeout=30.0, reconnect=True, self_deaf=True); self.voice_clients[guild_id] = vc
+            except Exception as e: self.logger.exception(f"[{guild_id}] Connect Err"); await ctx.send(f"❌ Connect Err: {e}", ephemeral=True); return None
+        elif vc.channel != channel:
+             self.logger.info(send(f"🎵 Now Playing: **{title}** (Req by {requester.mention})")
+                    except discord.HTTPException as send_err: self.logger.warning(f"[{guild_id}] Failed to send Now Playing message: {send_err}")
+                    # Wait using queue.join instead of sleep loop
+                    await self.music_queues[guild_id].join() # Wait until task_done called for this item
+
+                except discord.ClientException as ce: self.logger.error(f"[{guild_id}] ClientException during playback: {ce}"); await ctx.send(f"❌ Playback Error: {ce}"); self.music_queues[guild_id].task_done()
+                except Exception as e: self.logger.exception(f"[{guild_id}] Error during playback of '{title}'"); await ctx.send(f"❌ Error playing '{title}'."); self.music_queues[guild_id].task_done()
+                finally: self.current_song.pop(guild_id, None) # Clear current song after attempting/finishing play
+
+        except asyncio.CancelledError: self.logger.info(f"[{guild_id}] Player task cancelled.")
+        finally: # General task cleanup
+            self.logger.info(f"[{guild_id}] Player task cleanup.")
+            self.current_song.pop(guild_id, None)
+            if guild_id in self.play_next_tasks: del self.play_next_tasks[guild_id]
+            vc = self.voice_clients.get(guild_id)
+            if vc and vc.is_connected():
+                 self.logger.info(f"[{guild_id}] Disconnecting VC after player task ended naturally.")
+                 try: await vc.disconnect(force=True);
+                 except Exception as e: self.logger.error(f"[{guild_id}] Error disconnecting VC in cleanup: {e}")
+            if guild_id in self.voice_clients: del self.voice_clients[guild_id]
+
+    def _handle_after_play(self, ctx: Context, error: Exception | None, title: str):
+        """Callback run after vc.play finishes - MUST be threadsafe."""
+        guild_id = ctx.guild.id
+        log_func = self.logger.error if error else self.logger.info
+        log_func(f'[{guild_id}] {"Player error" if error else "Finished playing"} "{title}"' + (f": {error}" if error else "."))
+        queue = self.music_queues.get(guild_id)
+        if queue:
+            try: queue.task_done() # Signal that the item processing is done
+            except ValueError: pass
+            except Exception as e: self.logger.error(f"[{guild_id}] Error task_done: {e}")
+        # The player task is waiting on queue.join(), which task_done() unblocks
+
+    async def _ensure_voice_client(self, ctx: Context) -> discord.VoiceClient | None:
+        """Connects/moves VC if needed, returns VC object or None on failure."""
+        guild_id = ctx.guild.id
+        vc = self.voice_clients.get(guild_id)
+
+        if not ctx.author.voice:
+             await ctx.send("📢 Join a voice channel first.", ephemeral=True); return None
+        channel = ctx.author.voice.channel
+
+        if vc is None or not vc.is_connected():
+            self.logger.info(f"[{guild_id}] Connecting to VC: {channel.name}")
+            try: vc = await channel.connect(timeout=30.0, reconnect=True, self_deaf=True); self.voice_clients[guild_id] = vc
+            except Exception as e: self.logger.exception(f"[{guild_id}] Connect Err"); await ctx.send(f"❌ Connect Err: {e}", ephemeral=True); return None
+        elif vc.channel != channel:
+             self.logger.info(f"followup.send("Error sending response.")
+
+    @app_commands.command(name="feedback", description="Submit feedback.")
+    async def feedback(self, interaction: discord.Interaction) -> None:
+        """ Submit feedback via modal. """
+        form = FeedbackForm(); await interaction.response.send_modal(form); timed_out = await form.wait()
+        if timed_out or not hasattr(form, 'interaction') or not form.interaction: self.logger.info(f"Feedback modal timeout/dismiss from {interaction.user}"); return
+        modal_i = form.interaction;
+        try: await modal_i.response.send_message(embed=discord.Embed(description="Feedback sent!", color=0x9B59B6), ephemeral=True)
+        except discord.HTTPException as e: self.logger.error(f"Failed feedback confirm: {e}")
+        try:
+            app_info = await self.bot.application_info(); owner = app_info.owner
+            if owner: await owner.send(embed=discord.Embed(title="Feedback Received", color=0x9B59B6, timestamp=discord.utils.utcnow(),
+                                                        description=f"**From:** {modal_i.user} (`{modal_i.user.id}`)\n**Server:** {modal_i.guild.name if modal_i.guild else 'DM'}\n**Channel:** {modal_i.channel.name if modal_i.channel else 'DM'}\n```\n{form.answer}\n```"))
+            else: self.logger.warning("Cannot determine app owner.")
+        except Exception as e: self.logger.exception(f"Failed sending feedback DM: {e}")
+
+    # --- Gemini AI Command ---
+    @commands.hybrid_command(name="gemini", description="Ask the Gemini AI model.")
+    @app_commands.describe(prompt="Your prompt/question for Gemini.")
+    async def gemini(self, context: Context, *, prompt: str):
+        """Sends a prompt to the configured Google Gemini model."""
+        if not self.gemini_model: return await context.send("❌ Gemini disabled.", ephemeral=True)
+        if not prompt: return await context.send("⚠️ Provide prompt for Gemini.", ephemeral=True)
+        await context.defer()
+        try:
+            self.logger.info(f"[Gemini] Prompt from {context.author}: '{prompt[:50]}...'")
+            # Ensure generate_content_async is used for non-blocking API call
+            response = await self.gemini_model.generate_content_async(prompt)
+
+            # Improved safety and response checking
+            if not response.candidates or not hasattr(response.candidates[0], 'content') or not hasattr(response.candidates[0].content,'parts') or not response.text:
+                safety_info = ""
+                if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
+                     safety_info = f" (Reason: {response.prompt_feedback.block_reason.name})" # Use name attribute
+                self.logger.warning(f"[Gemini] Response blocked/empty for '{prompt[:50]}' {safety_info}")
+                await context.followup.send(f"⚠️ Gemini didn't respond.{safety_info}")
+                return
+
+            result_text = response.text; self.logger.info(f"[Gemini] Response: '{result_text[:50]}...'")
+            embed = discord.Embed(title="✨ Gemini Response", description=result_text[:4000], color=0x4285F4).set_footer(text=f"Prompt by {context.author.display_name}")
+
+            # Send response (handling potential length issues)
+            if len(result_text) <= 4000:
+                await context.followup.send(embed=embed)
+            else:
+                await context.followup.send(embed=embed) # Send first part in embed
+                remaining = result_text[4000:]
+                # Send remaining parts in chunks
+                for i in range(0, len(remaining), 1990):
+                     chunk = remaining[i:i+1990]
+                     await context.send(f"```\n{chunk}\n```") # Send subsequent parts as plain text blocks
+
+        except Exception as e:
+            self.logger.exception(f"[Gemini] API Error for '{prompt[:50]}...'")
+            await context.followup.send(f"❌ Gemini Error: {e}")
+
+    # --- Eden Hints Command Group ---
+    @commands.hybrid_group(name="edenhints", description="Hints and specific prompts.")
+    async def edenhints(self, context: Context):
+        """Base command for Eden hints."""
+        # Send help if invoked without subcommand
+        if context.invoked_subcommand is None:
+            await context.send_help(context.command)
+
+    @edenhints.command(name="suggestions", description="Example prompt suggestions.")
+    async def suggestions(self, context: Context):
+        """Provides some example prompt ideas."""
+        embed = discord.Embed(title="💡 Eden Hints - Suggestions", color=0xBEBEFE)
+        suggestions_list = [
+            "`/gemini Explain recursion simply.`",
+            "`/gemini Write a short poem about a rainy day.`",
+            "`/gemini What are the pros and cons of using Node.js vs Python for web development?`",
+            "`/gemini Suggest 5 healthy breakfast ideas.`",
+            "`/gemini Summarize the main points of the theory of relativity.`",
+            "`/edenhints prompts eden11` - Run the specific Eden11 system prompt.",
+        ]
+        embed.description = "\n".join(suggestions_list)
+        await context.send(embed=embed)
+
+    @edenhints.group(name="prompts", description="Run specific stored prompts.")
+    async def prompts(self, context: Context):
+        """Base command for specific prompts."""
+        if context.invoked_subcommand is None:
+            await context.send_help(context.command)
+
+    @prompts.command(name="eden11", description="Runs the 'gemini jb.txt' prompt (Owner Only).")
+    @commands.is_owner() # Restrict this specific prompt command to the owner
+    async def eden11_prompt(self, context: Context):
+        """Loads and runs the content of 'gemini jb.txt' as a prompt."""
+        if not self.gemini_model:
+            return await context.send("❌ Gemini disabled.", ephemeral=True)
+
+        file_path = self.analysis_file2 # Use the filename stored in __init__
+        await context.defer(ephemeral=True) # Defer response, make it ephemeral
+
+        try:
+            if not os.path.exists(file_path):
+                self.logger.error(f"[EdenHints] File missing: {file_path}")
+                return await context.followup.send(f"❌ File missing: `{file_path}`.", ephemeral=True)
+
+            with open(file_path, 'r', encoding='utf-8') as f:
+                eden_prompt = f.read()
+
+            if not eden_prompt:
+                 self.logger.warning(f"[EdenHints] File empty: {file_path}")
+                 return await context.followup.send(f"⚠️ File empty: `{file_path}`.", ephemeral=True)
+
+            self.logger.info(f"[EdenHints] Sending prompt from {file_path} by {context.author}")
+
+            # Send the file content as the prompt to Gemini
+            response = await self.gemini_model.generate_content_async(eden_prompt)
+
+            # Check for safety blocks or empty response
+            if not response.candidates or not hasattr(response.candidates[0], 'content') or not hasattr(response.candidates[0].content,'parts') or not response.text:
+                safety_info = ""
+                if hasattr(response, 'prompt_feedback') and response.prompt_feedback and response.prompt_feedback.block_reason:
+                     safety_info = f" (Reason: {response.prompt_feedback.block_reason.name})"
+                self.logger.warning(f"[EdenHints] Response blocked/empty {safety_info}")
+                await context.followup.send(f"⚠️ Gemini didn't respond.{safety_info}")
+                return
+
+            result_text = response.text
+            self.logger.info(f"[EdenHints] Response: '{result_text[:50]}...'")
+
+            # Format the response showing both original and result
+            embed = discord.Embed(title="✨ Eden11 Prompt Result", color=0x4285F4)
+            # Show snippets, limit lengths
+            original_snippet = eden_prompt[:1000] + "..." if len(eden_prompt) > 1000 else eden_prompt
+            response_snippet = result_text[:1000] + "..." if len(result_text) > 1000 else result_text
+            embed.add_field(name=f"Original Prompt (`{file_path}`)", value=f"```\n{original_snippet}\n```", inline=False)
+            embed.add_field(name="Gemini Response", value=response_snippet, inline=False)
+            embed.set_footer(text=f"Triggered by {context.author.display_name}")
+
+            await context.followup.send(embed=embed, ephemeral=True) # Send result ephemerally
+
+        except FileNotFoundError: # Specific handling if file disappears between check and open
+            self.logger.error(f"[EdenHints] File not found error for {file_path}")
+            await context.followup.send(f"❌ Error: File `{file_path}` not found.", ephemeral=True)
+        except IOError as e:
+            self.logger.error(f"[EdenHints] Error reading file {file_path}: {e}")
+            await context.followup.send(f"❌ Error reading prompt file `{file_path}`.", ephemeral=True)
+        except Exception as e:
+            self.logger.exception(f"[EdenHints] Error processing {file_path}")
+            await context.followup.send(f"❌ Error processing prompt: {e}", ephemeral=True)
+
+# --- End of Hecate Cog Definition ---
+
+# --- Cog Definition: MusicCog ---
+# yt-dlp options
+YDL_OPTS = { 'format': 'bestaudio/best', 'outtmpl': '%(extractor)s-%(id)s-%(title)s.%(ext)s', 'restrictfilenames': True, 'noplaylist': True, 'nocheckcertificate': True, 'ignoreerrors': False, 'logtostderr': False, 'quiet': True, 'no_warnings': True, 'default_search': 'ytsearch1', 'source_address': '0.0.0.0', 'extract_flat': 'discard_in_playlist', 'lazy_playlist': True }
+# FFmpeg options
+FFMPEG_OPTIONS = { 'options': '-vn', "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -analyzeduration 10M -probesize 10M" }
+
+class MusicCog(commands.Cog, name="music"):
+    def __init__(self, bot_instance: commands.Bot):
+        self.bot = bot_instance
+        self.logger = logging.getLogger('MusicCog'); self.logger.setLevel(logging.INFO)
+        global log_file_handler, log_console_handler
+        if log_file_handler not in self.logger.handlers: self.logger.addHandler(log_file_handler)
+        if log_console_handler not in self.logger.handlers: self.logger.addHandler(log_console_handler)
+        self.logger.propagate = False
+        self.spotify_token = None; self.spotify_token_expiry = datetime.datetime.now(datetime.timezone.utc) # Use UTC
+        self.gif_list = ["https://media.giphy.com/media/26ufdipQqU2lhNA4g/giphy.gif", "https://media.giphy.com/media/l41lO3OQv0vP6xj8A/giphy.gif", "https://media.giphy.com/media/3orieVVSGK76O7fPHq/giphy.gif"]
+        self.current_gif_index = 0; self.gif_channel_id = None # <<< SET CHANNEL ID (int) FOR GIF UPDATES >>>
+        self.music_queues = {}; self.current_song = {}; self.voice_clients = {}; self.play_next_tasks = {}
+        self.logger.info("MusicCog __init__ completed.") # Logging init completion
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        self.logger.info(f"{self.qualified_name} cog ready.")
+        # Start GIF task if configured
+        # if self.gif_channel_id and hasattr(self, 'gif_cycle_task') and not self.gif_cycle_task.is_running(): self.gif_cycle_task.start(); self.logger.info("Starting GIF task.")
+
+    def cog_unload(self):
+        # Cancel background tasks
+        if hasattr(self, 'gif_cycle_task') and self.gif_cycle_task.is_running(): self.gif_cycle_task.cancel()
+        for task in self.play_next_tasks.values():
+            if task and not task.done(): task.cancel()
+        # Disconnect VCs managed by this cog
+        async def cleanup_vcs():
+            self.logger.info(f"[{self.qualified_name}] Cleaning up VCs on unload...")
+            for guild_id, vc in list(self.voice_clients.items()): # Iterate over copy
+                if vc and vc.is_connected():
+                    try: await vc.disconnect(force=True)
+                    except Exception as e: self.logger.error(f"[{guild_id}] Error disconnecting on unload: {e}")
+            self.voice_clients.clear()
+            self.logger.info(f"[{self.qualified_name}] VCs cleaned up.")
+        # Ensure cleanup runs in the bot's event loop
+        if self.bot.loop.is_running():
+             asyncio.create_task(cleanup_vcs())
+        else: # Fallback if loop not running
+             try:
+                 asyncio.run(cleanup_vcs())
+             except RuntimeError:
+                 self.logger.warning("Event loop closed, cannot fully cleanup VCs on unload.")
+        self.logger.info(f"{self.qualified_name} cog unloaded.")
+
+    # --- Spotify Helpers ---
+    def _get_spotify_token(self):
+        if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET: self.logger.error("Spotify creds missing."); raise ValueError("Spotify credentials missing.")
+        now = datetime.datetime.now(datetime.timezone.utc)
+        if not self.spotify_token or now >= self.spotify_token_expiry:
+            self.logger.info("Refreshing Spotify token."); url = "https://accounts.spotify.com/api/token"
+            headers = {"Content-Type": "application/x-www-form-urlencoded"}; data = { "grant_type": "client_credentials", "client_id": SPOTIFY_CLIENT_ID, "client_secret": SPOTIFY_CLIENT_SECRET }
+            try:
+                response = requests.post(url, headers=headers, data=data, timeout=10); response.raise_for_status(); token_data = response.json()
+                self.spotify_token = token_data["access_token"]; expires_in = token_data.get("expires_in", 3600)
+                self.spotify_token_expiry = now + datetime.timedelta(seconds=expires_in - 60); self.logger.info("Spotify token refreshed."); return self.spotify_token
+            except requests.exceptions.RequestException as e: self.logger.error(f"Spotify Auth Fail: {e}"); raise Exception(f"Spotify Auth Fail: {e}")
+            except Exception as e: self.logger.exception("Spotify token refresh error."); raise Exception(f"Spotify Auth Fail: {e}")
+        else: return self.spotify_token
+
+    def _get_playlist_tracks(self, playlist_id):
+        try:
+            token = self._get_spotify_token(); fields = "items(track(name,artists(name)))"; url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks?fields={fields}"
+            headers = {"Authorization": f"Bearer {token}"}; all_tracks = []; offset = 0; limit = 50
+            while True:
+                paginated_url = f"{url}&offset={offset}&limit={limit}"; response = requests.get(paginated_url, headers=headers, timeout=10); response.raise_for_status(); tracks_data = response.json()
+                items = tracks_data.get("items", []);
+                if not items: break
+                all_tracks.extend([f"{i['track']['name']} - {i['track']['artists'][0]['name']}" for i in items if i.get('track') and i['track'].get('name') and i['track'].get('artists')])
+                if len(items) < limit: break
+                offset += limit
+            self.logger.info(f"Fetched {len(all_tracks)} tracks from Spotify playlist {playlist_id}"); return all_tracks
+        except requests.exceptions.RequestException as e: self.logger.error(f"Failed getting playlist {playlist_id}: {e}"); raise Exception(f"HTTP error fetching playlist: {e}")
+        except Exception as e: self.logger.exception(f"Error getting playlist {playlist_id}"); raise Exception(f"Error processing playlist: {e}")
+
+    # --- Audio Extraction ---
+    async def _extract_audio_source(self, url, loop):
+        self.logger.info(f"Extracting source for: {url}")
+        try:
+            with yt_dlp.YoutubeDL(YDL_OPTS) as ydl: data = await loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+            if not data: raise ValueError("yt-dlp returned no data.")
+            entry_data = data['entries'][0] if 'entries' in data else data; stream_url = None
+            # Prioritize direct URL if available
+            if 'url' in entry_data: stream_url = entry_data['url']
+            elif 'formats' in entry_data:
+                 formats = entry_data.get('formats', []);
+                 # Find best audio-only if possible
+                 audio_formats = [f for f in formats if f.get('url') and f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+                 if audio_formats: stream_url = max(audio_formats, key=lambda f: f.get('abr', 0) or 0).get('url')
+                 else: # Fallback: Best format with audio
+                     audio_formats_any = [f for f in formats if f.get('url') and f.get('acodec') != 'none']
+                     if audio_formats_any: stream_url = max(audio_formats_any, key=lambda f: f.get('abr', 0) or 0).get('url'); self.logger.warning(f"Using non-optimal stream for {entry_data.get('title', url)}")
+            if not stream_url: self.logger.error(f"No stream URL found for {url}. Data: {data}"); raise ValueError("Could not find playable stream URL.")
+            title = entry_data.get('title', 'Unknown Title'); self.logger.info(f"Extracted source for '{title}'")
+            return stream_url, title
+        except yt_dlp.utils.DownloadError as e: self.logger.error(f"yt-dlp DL Error: {e}"); msg=str(e); raise ValueError(f"Extraction Error: {'Unsupported URL' if 'Unsupported URL' in msg else 'Video unavailable' if 'Video unavailable' in msg else e}")
+        except Exception as e: self.logger.exception(f"Extraction error for {url}"); raise ValueError(f"Extraction Error: {e}")
+
+    # --- GIF & Visualizer Stubs ---
+    def _get_next_gif(self):
+        """Cycles through the GIF list."""
+        if not self.gif_list:
+            self.logger.warning("GIF list is empty.")
+            return None
+        if self.current_gif_index >= len(self.gif_list):
+             self.current_gif_index = 0
+        gif_url = self.gif_list[self.current_gif_index]
+        self.current_gif_index = (self.current_gif_index + 1) % len(self.gif_list)
+        return gif_url
+
+    def _activate_visualizer(self):
+        """Placeholder for visualizer activation."""
+        self.logger.info("Visualizer activated (stub).")
+        return "Visualizer activated! (Stub)"
+
+    # --- Player Task & Callback ---
+    async def _player_task(self, ctx: Context):
+        guild_id = ctx.guild.id; self.play_next_tasks[guild_id] = asyncio.current_task(); self.logger.info(f"[{guild_id}] Player task started.")
+        try:
+            while True:
+                vc = self.voice_clients.get(guild_id)
+                if not vc or not vc.is_connected(): self.logger.warning(f"[{guild_id}] Player task exit: VC disconnected externally."); break
+                try: next_item = await asyncio.wait_for(self.music_queues[guild_id].get(), timeout=300.0) # 5 min timeout
+                except asyncio.TimeoutError: self.logger.info(f"[{guild_id}] Player task timeout."); break
+                except asyncio.CancelledError: self.logger.info(f"[{guild_id}] Player task cancelled."); break
+                except KeyError: self.logger.info(f"[{guild_id}] Player task stopping: Queue not found."); break
+
+                source_url, title, requester = next_item['source'], next_item['title'], next_item['requester']
+                self.current_song[guild_id] = next_item; self.logger.info(f"[{guild_id}] Playing: '{title}' req by {requester}")
+                if not vc.is_connected(): self.logger.warning(f"[{guild_id}] Disconnected before playing '{title}'."); self.music_queues[guild_id].task_done(); self.current_song.pop(guild_id, None); continue
+
+                try:
+                    player = discord.FFmpegPCMAudio(source_url, **FFMPEG_OPTIONS)
+                    # Ensure after callback runs in the correct loop and handles context safely
+                    def after_callback(error): self.bot.loop.call_soon_threadsafe(self._handle_after_play, ctx, error, title)
+                    vc.play(player, after=after_callback)
+                    # Send Now Playing message after starting playback
+                    try: await ctx.send(f"🎵 Now Playing: **{title}** (Req by {requester.mention})")
+                    except discord.HTTPException as send_err: self.logger.warning(f"[{guild_id}] Failed to send Now Playing message: {send_err}")
+                    # Wait using queue.join instead of sleep loop
+                    await self.music_queues[guild_id].join() # Wait until task_done called for this item
+
+                except discord.ClientException as ce: self.logger.error(f"[{guild_id}] ClientException during playback: {ce}"); await ctx.send(f"❌ Playback Error: {ce}"); self.music_queues[guild_id].task_done()
+                except Exception as e: self.logger.exception(f"[{guild_id}] Error during playback of '{title}'"); await ctx.send(f"❌ Error playing '{title}'."); self.music_queues[guild_id].task_done()
+                finally: self.current_song.pop(guild_id, None) # Clear current song after attempting/finishing play
+
+        except asyncio.CancelledError: self.logger.info(f"[{guild_id}] Player task cancelled.")
+        finally: # General task cleanup
+            self.logger.info(f"[{guild_id}] Player task cleanup.")
+            self.current_song.pop(guild_id, None)
+            if guild_id in self.play_next_tasks: del self.play_next_tasks[guild_id]
+            vc = self.voice_clients.get(guild_id)
+            if vc and vc.is_connected():
+                 self.logger.info(f"[{guild_id}] Disconnecting VC after player task ended naturally.")
+                 try: await vc.disconnect(force=True);
+                 except Exception as e: self.logger.error(f"[{guild_id}] Error disconnecting VC in cleanup: {e}")
+            if guild_id in self.voice_clients: del self.voice_clients[guild_id]
+
+    def _handle_after_play(self, ctx: Context, error: Exception | None, title: str):
+        """Callback run after vc.play finishes - MUST be threadsafe."""
+        guild_id = ctx.guild.id
+        log_func = self.logger.error if error else self.logger.info
+        log_func(f'[{guild_id}] {"Player error" if error else "Finished playing"} "{title}"' + (f": {error}" if error else "."))
+        queue = self.music_queues.get(guild_id)
+        if queue:
+            try: queue.task_done() # Signal that the item processing is done
+            except ValueError: pass
+            except Exception as e: self.logger.error(f"[{guild_id}] Error task_done: {e}")
+        # Player task loop will check queue again
+
+    async def _ensure_voice_client(self, ctx: Context) -> discord.VoiceClient | None:
+        """Connects/moves VC if needed, returns VC object or None on failure."""
+        guild_id = ctx.guild.id
+        vc = self.voice_clients.get(guild_id)
+
+        if not ctx.author.voice:
+             await ctx.send("📢 Join a voice channel first.", ephemeral=True); return None
+        channel = ctx.author.voice.channel
+
+        if vc is None or not vc.is_connected():
+            self.logger.info(f"[{guild_id}] Connecting to VC: {channel.name}")
+            try: vc = await channel.connect(timeout=30.0, reconnect=True, self_deaf=True); self.voice_clients[guild_id] = vc
+            except Exception as e: self.logger.exception(f"[{guild_id}] Connect Err"); await ctx.send(f"❌ Connect Err: {e}", ephemeral=True); return None
+        elif vc.channel != channel:
+             self.logger.info(f"[{guild_id}] Moving to VC: {channel.name}")
+             try: await vc.move_to(channel)
+             except Exception as e: self.logger.exception(f"[{guild_id}] Move Err"); await ctx.send(f"❌ Move Err: {e}", ephemeral=True); return None
+        return vc
+
+    async def _cleanup_vc(self, guild_id: int):
+        """Internal cleanup when VC disconnects unexpectedly or needs reset."""
+        self.logger.warning(f"[{guild_id}] Cleaning up VC state.")
+        vc = self.voice_clients.pop(guild_id, None) # Remove tracked VC
+        self.current_song.pop(guild_id, None) # Clear current song
+
+        # Cancel player task if running
+        task = self.play_next_tasks.pop(guild_id, None)
+        if task and not task.done(): task.cancel()
+
+        # Clear queue
+        queue = self.music_queues.pop(guild_id, None)
+        if queue:
+             while not queue.empty(): try: queue.get_nowait(); queue.task_done(); except: break
+
+        # Attempt disconnect if VC object exists and thinks it's connected
+        if vc and vc.is_connected():
+            try: await vc.disconnect(force=True)
+            except Exception as e: self.logger.error(f"[{guild_id}] Error during VC cleanup disconnect: {e}")
+
+
+    # --- Music Commands ---
+    @commands.hybrid_command(name="play", description="Plays/Queues audio (URL, Search, Spotify Playlist [Lists Only]).")
+    @app_commands.describe(query="URL or search term for YouTube, Spotify Playlist URL, or Direct Media URL.")
+    async def play(self, ctx: Context, *, query: str):
+        """Plays/Queues audio from various sources."""
+        if AUTHORIZED_USER_ID is not None and ctx.author.id != AUTHORIZED_USER_ID: return await ctx.send("❌ Not authorized.", ephemeral=True)
+        await ctx.defer()
+        vc = await self._ensure_voice_client(ctx); send_func = ctx.interaction.followup.send if ctx.interaction else ctx.send
+        if not vc: return # Error handled in helper
+
+        guild_id = ctx.guild.id
+
+        # Spotify Playlist Handling (Listing Only)
+        if "open.spotify.com/playlist" in query:
+            if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET: return await send_func("❌ Spotify disabled.", ephemeral=True)
+            try:
+                playlist_id = query.split("/")[-1].split("?")[0]; self.logger.info(f"[{guild_id}] Proc Spotify list: {playlist_id}"); tracks = self._get_playlist_tracks(playlist_id)
+                desc = "\n".join([f"`{i+1}. {t}`" for i, t in enumerate(tracks[:20])]); embed = discord.Embed(title=f"🎧 Spotify Playlist ({len(tracks)})", description=desc, color=0x1DB954)
+                if len(tracks) > 20: embed.set_footer(text=f"...and {len(tracks)-20} more.")
+                return await send_func(embed=embed)
+            except Exception as e: return await send_func(f"❌ Spotify Error: {e}", ephemeral=True)
+
+        # YouTube/Direct URL/Search Handling
+        try:
+            self.logger.info(f"[{guild_id}] Proc query/URL: {query}"); effective_url = f"ytsearch1:{query}" if not (query.startswith("http://") or query.startswith("https://")) else query
+            source_url, title = await self._extract_audio_source(effective_url, asyncio.get_event_loop())
+
+            if guild_id not in self.music_queues: self.music_queues[guild_id] = asyncio.Queue()
+            queue_item = {'source': source_url, 'title': title, 'requester': ctx.author}; await self.music_queues[guild_id].put(queue_item)
+            self.logger.info(f"[{guild_id}] Queued '{title}' by {ctx.author}")
+            await send_func(f"✅ Queued: **{title}**")
+
+            # Start player task if needed
+            current_task = self.play_next_tasks.get(guild_id)
+            if current_task is None or current_task.done():
+                 if not vc.is_playing() and not vc.is_paused(): # Start only if not already playing
+                      self.play_next_tasks[guild_id] = self.bot.loop.create_task(self._player_task(ctx))
+                 elif vc.is_playing() or vc.is_paused(): self.logger.info(f"[{guild_id}] VC busy, queueing '{title}', player task exists.")
+                 else: self.play_next_tasks[guild_id] = self.bot.loop.create_task(self._player_task(ctx))
+
+        except ValueError as e: await send_func(f"❌ Error: {e}", ephemeral=True)
+        except Exception as e: self.logger.exception(f"[{guild_id}] Play cmd error: {query}"); await send_func(f"❌ Unexpected Error: {e}", ephemeral=True)
+
+
+    @commands.hybrid_command(name="stop", description="Stops audio, clears queue, leaves VC.")
+    async def stop(self, ctx: Context):
+        """Stops playback, clears queue, leaves VC."""
+        if AUTHORIZED_USER_ID is not None and ctx.author.id != AUTHORIZED_USER_ID: return await ctx.send("❌ Not authorized.", ephemeral=True)
+        guild_id = ctx.guild.id; vc = self.voice_clients.get(guild_id); send_func = ctx.interaction.followup.send if ctx.interaction and ctx.interaction.response.is_done() else ctx.send
+
+        if vc and vc.is_connected():
+            self.logger.info(f"[{guild_id}] Stop cmd from {ctx.author}.")
+            vc.stop() # Stop current playback
+
+            # Cancel player task & cleanup VC/Queue state
+            await self._cleanup_vc(guild_id)
+
+            # Disconnect if still connected (cleanup might fail sometimes)
+            if vc.is_connected():
+                try: await vc.disconnect(force=True)
+                except Exception as e: self.logger.error(f"[{guild_id}] Error during explicit disconnect in stop: {e}")
+
+            await send_func("⏹️ Stopped & Disconnected.", ephemeral=True)
+        else: await send_func("🔇 Not connected.", ephemeral=True)
+
+
+    @commands.hybrid_command(name="skip", description="Skips the current song.")
+    async def skip(self, ctx: Context):
+        """Skips the currently playing song."""
+        if AUTHORIZED_USER_ID is not None and ctx.author.id != AUTHORIZED_USER_ID: return await ctx.send("❌ Not authorized.", ephemeral=True)
+        guild_id = ctx.guild.id; vc = self.voice_clients.get(guild_id); send_func = ctx.interaction.followup.send if ctx.interaction and ctx.interaction.response.is_done() else ctx.send
+
+        if vc and vc.is_playing():
+             current_title = self.current_song.get(guild_id, {}).get('title', "Current Song")
+             self.logger.info(f"[{guild_id}] Skip cmd by {ctx.author} for '{current_title}'")
+             vc.stop() # Triggers 'after' callback -> _handle_play_completion -> player task handles next
+             await send_func(f"⏭️ Skipped: **{current_title}**")
+        else: await send_func("🔇 Nothing playing to skip.", ephemeral=True)
+
+
+    @commands.hybrid_command(name="queue", description="Shows the music queue.")
+    async def queue(self, ctx: Context):
+         """Displays the songs currently in the queue."""
+         guild_id = ctx.guild.id; queue_list = []; embed = discord.Embed(title="🎵 Music Queue", color=0x9B59B6)
+         current = self.current_song.get(guild_id); queue = self.music_queues.get(guild_id)
+         q_size = queue.qsize() if queue else 0
+
+         if current: embed.add_field(name="▶️ Now Playing", value=f"**{current['title']}** (Req by {current['requester'].mention})", inline=False)
+
+         if q_size > 0:
+              temp_list = list(queue._queue); display_limit = 15
+              queue_list = [f"`{i+1}.` {item['title']} (Req by {item['requester'].mention})" for i, item in enumerate(temp_list[:display_limit])]
+              embed.add_field(name=f"⬆️ Up Next ({q_size} song{'s' if q_size != 1 else ''})", value="\n".join(queue_list), inline=False)
+              if q_size > display_limit: embed.set_footer(text=f"...and {q_size - display_limit} more.")
+         elif not current: embed.description = "The queue is empty!" # Only show if nothing playing
+
+         await ctx.send(embed=embed)
+
+
+    @commands.hybrid_command(name="leave", description="Disconnects the bot (same as stop).")
+    async def leave(self, ctx: Context):
+        """Disconnects the bot, alias for stop."""
+        await self.stop(ctx)
+
+
+    # --- Optional GIF Task (Commented Out) ---
+    # @tasks.loop(seconds=60)
+    # async def gif_cycle_task(self):
+    #     if self.gif_channel_id:
+    #         channel = self.bot.get_channel(self.gif_channel_id)
+    #         gif_url = self._get_next_gif()
+    #         if channel and gif_url:
+    #             try: await channel.send(f"{gif_url}")
+    #             except Exception as e: self.logger.error(f"Failed GIF cycle msg: {e}")
+    # @gif_cycle_task.before_loop
+    # async def before_gif_cycle(self): await self.bot.wait_until_ready()
+
+# --- End of MusicCog Definition ---
+
+
+# --- Bot Event Handlers (Main Scope) ---
+@bot.event
+async def on_ready() -> None:
+    bot_logger.info(f"Logged in as {bot.user.name} (ID: {bot.user.id})")
+    bot_logger.info(f"discord.py version: {discord.__version__}")
+    bot_logger.info(f"Python version: {platform.python_version()}")
+    bot_logger.info("-------------------")
+    await bot.change_presence(activity=discord.Activity(type=discord.ActivityType.watching, name=f"{BOT_PREFIX}help or /help"))
+    try:
+        synced = await bot.tree.sync() # Sync global commands
+        bot_logger.info(f"Synced {len(synced)} application command(s).")
+    except Exception as e: bot_logger.exception("Failed to sync application commands")
+
+@bot.event
+async def on_command_error(context: Context, error: commands.CommandError) -> None:
+    """ Handle errors globally if not handled by cog """
+    if getattr(error, 'handled', False): return # Cog handled it
+
+    reply_target = context; ephemeral_reply = bool(context.interaction)
+    async def send_error_reply(msg, **kwargs):
+        try:
+            target = context.interaction
+            # Ensure ephemeral kwarg is boolean True/False
+            eff_ephemeral = kwargs.pop('ephemeral', ephemeral_reply) if target else False
+            eff_kwargs = kwargs | {'ephemeral': eff_ephemeral} if target else kwargs
+
+            if target and not target.response.is_done(): await target.response.send_message(msg, **eff_kwargs)
+            elif target: await target.followup.send(msg, **eff_kwargs)
+            else: await context.send(msg, **kwargs) # No ephemeral for prefix commands generally
+        except discord.NotFound: bot_logger.warning("Interaction/context expired before error reply.")
+        except discord.HTTPException as e: bot_logger.error(f"Failed to send error reply: {e}")
+
+    # Error Handling Logic
+    if isinstance(error, commands.CommandNotFound): pass # Ignore
+    elif isinstance(error, commands.CheckFailure): await send_error_reply("🚫 Permissions check failed.", ephemeral=True)
+    elif isinstance(error, commands.MissingRequiredArgument): await send_error_reply(f"🤔 Missing argument: `{error.param.name}`.", ephemeral=ephemeral_reply)
+    elif isinstance(error, commands.CommandOnCooldown): await send_error_reply(f"⏳ Cooldown! Try again in {error.retry_after:.1f}s.", ephemeral=True, delete_after=10)
+    elif isinstance(error, commands.UserInputError): await send_error_reply(f"⚠️ Invalid input: {error}", ephemeral=ephemeral_reply)
+    elif isinstance(error, commands.CommandInvokeError):
+         original = error.original; bot_logger.error(f'Cmd Invoke Error in {context.command}:', exc_info=original)
+         # Provide more specific feedback for common music errors if possible
+         if isinstance(original, ValueError) and ("Extraction Error" in str(original) or "Spotify credentials missing" in str(original)): await send_error_reply(f"❌ {original}", ephemeral=ephemeral_reply)
+         else: await send_error_reply("⚙️ An internal error occurred.", ephemeral=ephemeral_reply)
+    else: bot_logger.error(f'Unhandled exception: {error}', exc_info=error)
+
+
+# --- Main Execution Block ---
+async def main():
+    """ Load cogs and run the bot """
+    async with bot:
+        try: await setup(bot); bot_logger.info("All cogs loaded.")
+        except Exception as e: bot_logger.exception("FATAL: Failed to load cogs"); sys.exit(1)
+        await bot.start(TOKEN)
+
+# --- Setup function to load ALL cogs ---
+async def setup(bot_instance: commands.Bot) -> None:
+    await bot_instance.add_cog(Hecate(bot_instance))
+    await bot_instance.add_cog(MusicCog(bot_instance)) # Load Music Cog
+
+if __name__ == "__main__":
+    # Pre-run checks
+    print("Performing pre-run checks..."); checks_ok = True
+    if not os.path.exists(".env"): print("WARNING: .env file not found."); checks_ok = False
+    if not os.path.exists("data_to_analyze.txt"): print("WARNING: data_to_analyze.txt not found.")
+    if not os.path.exists("gemini jb.txt"): print("WARNING: 'gemini jb.txt' not found.")
+    if not os.path.isdir(MACGRUGER_PROMPTS_BASE_PATH): print(f"WARNING: MacGruger prompts path missing: {MACGRUGER_PROMPTS_BASE_PATH}")
+    if not GOOGLE_API_KEY: print("WARNING: GOOGLE_API_KEY missing.")
+    if not SPOTIFY_CLIENT_ID or not SPOTIFY_CLIENT_SECRET: print("WARNING: Spotify creds missing.")
+    # AUTHORIZED_USER_ID is optional
+    try: subprocess.run(["ffmpeg", "-version"], capture_output=True, check=True, timeout=5)
+    except Exception: print("ERROR: ffmpeg not found or failed. Music playback will fail."); checks_ok = False
+    print("Pre-run checks complete.")
+
+    # Exit if critical components missing
+    if not TOKEN or not checks_ok: # Check checks_ok which includes ffmpeg check
+        print("Exiting due to missing token or critical dependencies (like ffmpeg).")
+        sys.exit(1)
+
+    try: asyncio.run(main())
+    except KeyboardInterrupt: bot_logger.info("Bot manually shut down.")
+    except discord.LoginFailure: bot_logger.critical("Login Failure: Invalid Discord Token?")
+    except Exception as e: bot_logger.critical("Critical error during bot execution", exc_info=True)

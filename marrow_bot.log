@@ -1,0 +1,285 @@
+2025-04-09 11:37:53,578:INFO:HecateBot: Google AI SDK configured successfully.
+2025-04-09 11:37:53,595:INFO:HecateBot: Setting up bot...
+2025-04-09 11:37:53,595:INFO:HecateBot: Loading Cog: Hecate
+2025-04-09 11:37:53,596:INFO:HecateBot: [Hecate] Initialized Gemini Pro model.
+2025-04-09 11:37:53,596:INFO:HecateBot: [Hecate] Checked MacGruger bots dir: /Users/claytonwade/Library/MacGruger/DiscordBots
+2025-04-09 11:37:53,597:INFO:HecateBot: Loading Cog: MusicCog
+2025-04-09 11:37:53,597:INFO:HecateBot: [MusicCog] Initialized (Placeholder Implementation).
+2025-04-09 11:37:53,597:INFO:HecateBot: All cogs loaded/initialized successfully.
+2025-04-09 11:37:53,598:INFO:HecateBot: Attempting to start bot...
+2025-04-09 11:37:56,816:INFO:HecateBot: Logged in as Hecate (ID: 1359507794398806026)
+2025-04-09 11:37:56,816:INFO:HecateBot: discord.py API version: 2.5.2
+2025-04-09 11:37:56,818:INFO:HecateBot: Python version: 3.13.2
+2025-04-09 11:37:56,818:INFO:HecateBot: Running on: Darwin 24.3.0 (posix)
+2025-04-09 11:37:56,818:INFO:HecateBot: Bot Prefix: !
+2025-04-09 11:37:56,818:INFO:HecateBot: Invite Link: https://discord.com/oauth2/authorize?client_id=1359507794398806026&scope=bot+applications.commands&permissions=326424916992
+2025-04-09 11:37:56,818:INFO:HecateBot: Syncing commands...
+2025-04-09 11:37:56,820:INFO:HecateBot: [MusicCog] Ready.
+2025-04-09 11:37:57,217:INFO:HecateBot: Synced 24 application commands.
+2025-04-09 11:37:57,217:INFO:HecateBot: ------ Bot is Ready ------
+2025-04-09 11:46:24,450:INFO:HecateBot: Executing super_prompt_cmd with keyword: mental health therapist.md
+2025-04-09 11:46:24,455:INFO:HecateBot: Simulating Awesome GPT query: mental health therapist.md (keyword mode: True)
+2025-04-09 11:47:17,856:INFO:HecateBot: [Gemini] Sending prompt from happyfappings: 'what does this mean: Placeholder prompt from simul...'
+2025-04-09 11:47:18,431:ERROR:HecateBot: [Gemini] Error during API call for prompt: 'what does this mean: Placeholder prompt from simul...'
+Traceback (most recent call last):
+  File "/Users/claytonwade/Documents/DiscordMain/Hecate/hecate_bot.py", line 351, in gemini
+    response = await self.gemini_model.generate_content_async(prompt)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/generativeai/generative_models.py", line 385, in generate_content_async
+    response = await self._async_client.generate_content(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/ai/generativelanguage_v1beta/services/generative_service/async_client.py", line 440, in generate_content
+    response = await rpc(
+               ^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 230, in retry_wrapped_func
+    return await retry_target(
+           ^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 160, in retry_target
+    _retry_error_helper(
+    ~~~~~~~~~~~~~~~~~~~^
+        exc,
+        ^^^^
+    ...<6 lines>...
+        timeout,
+        ^^^^^^^^
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_base.py", line 212, in _retry_error_helper
+    raise final_exc from source_exc
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 155, in retry_target
+    return await target()
+           ^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/grpc_helpers_async.py", line 88, in __await__
+    raise exceptions.from_grpc_error(rpc_error) from rpc_error
+google.api_core.exceptions.NotFound: 404 models/gemini-pro is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.
+2025-04-09 11:47:20,117:ERROR:HecateBot: Unhandled command error in 'gemini': Hybrid command raised an error: Command 'gemini' raised an exception: AttributeError: 'Context' object has no attribute 'followup'
+Traceback (most recent call last):
+  File "/Users/claytonwade/Documents/DiscordMain/Hecate/hecate_bot.py", line 351, in gemini
+    response = await self.gemini_model.generate_content_async(prompt)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/generativeai/generative_models.py", line 385, in generate_content_async
+    response = await self._async_client.generate_content(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/ai/generativelanguage_v1beta/services/generative_service/async_client.py", line 440, in generate_content
+    response = await rpc(
+               ^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 230, in retry_wrapped_func
+    return await retry_target(
+           ^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 160, in retry_target
+    _retry_error_helper(
+    ~~~~~~~~~~~~~~~~~~~^
+        exc,
+        ^^^^
+    ...<6 lines>...
+        timeout,
+        ^^^^^^^^
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_base.py", line 212, in _retry_error_helper
+    raise final_exc from source_exc
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 155, in retry_target
+    return await target()
+           ^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/grpc_helpers_async.py", line 88, in __await__
+    raise exceptions.from_grpc_error(rpc_error) from rpc_error
+google.api_core.exceptions.NotFound: 404 models/gemini-pro is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/discord/app_commands/commands.py", line 857, in _do_call
+    return await self._callback(self.binding, interaction, **params)  # type: ignore
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/claytonwade/Documents/DiscordMain/Hecate/hecate_bot.py", line 387, in gemini
+    await context.followup.send(f"❌ An error occurred while contacting Gemini: {type(e).__name__} - {e}")
+          ^^^^^^^^^^^^^^^^
+AttributeError: 'Context' object has no attribute 'followup'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/discord/ext/commands/hybrid.py", line 450, in _invoke_with_namespace
+    value = await self._do_call(ctx, ctx.kwargs)  # type: ignore
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/discord/app_commands/commands.py", line 876, in _do_call
+    raise CommandInvokeError(self, e) from e
+discord.app_commands.errors.CommandInvokeError: Command 'gemini' raised an exception: AttributeError: 'Context' object has no attribute 'followup'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/discord/ext/commands/hybrid.py", line 450, in _invoke_with_namespace
+    value = await self._do_call(ctx, ctx.kwargs)  # type: ignore
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/discord/app_commands/commands.py", line 876, in _do_call
+    raise CommandInvokeError(self, e) from e
+discord.ext.commands.errors.HybridCommandError: Hybrid command raised an error: Command 'gemini' raised an exception: AttributeError: 'Context' object has no attribute 'followup'
+2025-04-09 11:48:26,629:INFO:HecateBot: Executing ask_gpt_cmd with query: An unexpected error occurred: HybridCommandError
+2025-04-09 11:48:26,631:INFO:HecateBot: Simulating Awesome GPT query: An unexpected error occurred: HybridCommandError (keyword mode: False)
+2025-04-09 11:49:02,971:INFO:HecateBot: Executing ask_gpt_cmd with query: explain: Placeholder prompt from simulated internal function.
+2025-04-09 11:49:02,972:INFO:HecateBot: Simulating Awesome GPT query: explain: Placeholder prompt from simulated internal function. (keyword mode: False)
+2025-04-09 11:49:35,068:INFO:HecateBot: Executing ask_gpt_cmd with query: mental
+2025-04-09 11:49:35,069:INFO:HecateBot: Simulating Awesome GPT query: mental (keyword mode: False)
+2025-04-09 11:58:35,273:INFO:HecateBot: [MusicCog] Unloaded.
+2025-04-09 11:58:35,284:INFO:HecateBot: Shutdown signal received (KeyboardInterrupt). Bot is closing.
+2025-04-09 11:58:35,284:INFO:HecateBot: Bot process finished.
+2025-04-09 11:58:47,288:INFO:HecateBot: Google AI SDK configured successfully.
+2025-04-09 11:58:47,296:INFO:HecateBot: Setting up bot...
+2025-04-09 11:58:47,296:INFO:HecateBot: Loading Cog: Hecate
+2025-04-09 11:58:47,299:INFO:HecateBot: [Hecate] Initialized Gemini Pro model.
+2025-04-09 11:58:47,299:INFO:HecateBot: [Hecate] Checked MacGruger bots dir: /Users/claytonwade/Library/MacGruger/DiscordBots
+2025-04-09 11:58:47,300:INFO:HecateBot: Loading Cog: MusicCog
+2025-04-09 11:58:47,300:INFO:HecateBot: [MusicCog] Initialized (Placeholder Implementation).
+2025-04-09 11:58:47,300:INFO:HecateBot: All cogs loaded/initialized successfully.
+2025-04-09 11:58:47,300:INFO:HecateBot: Attempting to start bot...
+2025-04-09 11:58:50,286:INFO:HecateBot: Logged in as Hecate (ID: 1359507794398806026)
+2025-04-09 11:58:50,288:INFO:HecateBot: discord.py API version: 2.5.2
+2025-04-09 11:58:50,288:INFO:HecateBot: Python version: 3.13.2
+2025-04-09 11:58:50,288:INFO:HecateBot: Running on: Darwin 24.3.0 (posix)
+2025-04-09 11:58:50,288:INFO:HecateBot: Bot Prefix: !
+2025-04-09 11:58:50,288:INFO:HecateBot: Invite Link: https://discord.com/oauth2/authorize?client_id=1359507794398806026&scope=bot+applications.commands&permissions=326424916992
+2025-04-09 11:58:50,288:INFO:HecateBot: Syncing commands...
+2025-04-09 11:58:50,290:INFO:HecateBot: [MusicCog] Ready.
+2025-04-09 11:58:50,604:INFO:HecateBot: Synced 24 application commands.
+2025-04-09 11:58:50,604:INFO:HecateBot: ------ Bot is Ready ------
+2025-04-09 12:00:34,555:INFO:HecateBot: Simulating analyze_system_files command
+2025-04-09 12:01:53,289:INFO:HecateBot: Simulating serverinfo command
+2025-04-09 12:02:14,775:INFO:HecateBot: Simulating avatar command for happyfappings
+2025-04-09 12:03:38,233:INFO:HecateBot: [Gemini] Sending prompt from happyfappings: 'what does this mean?...'
+2025-04-09 12:03:38,679:ERROR:HecateBot: [Gemini] Error during API call for prompt: 'what does this mean?...'
+Traceback (most recent call last):
+  File "/Users/claytonwade/Documents/DiscordMain/Hecate/hecate_bot.py", line 351, in gemini
+    response = await self.gemini_model.generate_content_async(prompt)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/generativeai/generative_models.py", line 385, in generate_content_async
+    response = await self._async_client.generate_content(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/ai/generativelanguage_v1beta/services/generative_service/async_client.py", line 440, in generate_content
+    response = await rpc(
+               ^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 230, in retry_wrapped_func
+    return await retry_target(
+           ^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 160, in retry_target
+    _retry_error_helper(
+    ~~~~~~~~~~~~~~~~~~~^
+        exc,
+        ^^^^
+    ...<6 lines>...
+        timeout,
+        ^^^^^^^^
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_base.py", line 212, in _retry_error_helper
+    raise final_exc from source_exc
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 155, in retry_target
+    return await target()
+           ^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/grpc_helpers_async.py", line 88, in __await__
+    raise exceptions.from_grpc_error(rpc_error) from rpc_error
+google.api_core.exceptions.NotFound: 404 models/gemini-pro is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.
+2025-04-09 12:03:39,676:ERROR:HecateBot: Unhandled command error in 'gemini': Hybrid command raised an error: Command 'gemini' raised an exception: AttributeError: 'Context' object has no attribute 'followup'
+Traceback (most recent call last):
+  File "/Users/claytonwade/Documents/DiscordMain/Hecate/hecate_bot.py", line 351, in gemini
+    response = await self.gemini_model.generate_content_async(prompt)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/generativeai/generative_models.py", line 385, in generate_content_async
+    response = await self._async_client.generate_content(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/ai/generativelanguage_v1beta/services/generative_service/async_client.py", line 440, in generate_content
+    response = await rpc(
+               ^^^^^^^^^^
+    ...<4 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 230, in retry_wrapped_func
+    return await retry_target(
+           ^^^^^^^^^^^^^^^^^^^
+    ...<5 lines>...
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 160, in retry_target
+    _retry_error_helper(
+    ~~~~~~~~~~~~~~~~~~~^
+        exc,
+        ^^^^
+    ...<6 lines>...
+        timeout,
+        ^^^^^^^^
+    )
+    ^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_base.py", line 212, in _retry_error_helper
+    raise final_exc from source_exc
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/retry/retry_unary_async.py", line 155, in retry_target
+    return await target()
+           ^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/google/api_core/grpc_helpers_async.py", line 88, in __await__
+    raise exceptions.from_grpc_error(rpc_error) from rpc_error
+google.api_core.exceptions.NotFound: 404 models/gemini-pro is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/discord/app_commands/commands.py", line 857, in _do_call
+    return await self._callback(self.binding, interaction, **params)  # type: ignore
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/claytonwade/Documents/DiscordMain/Hecate/hecate_bot.py", line 387, in gemini
+    await context.followup.send(f"❌ An error occurred while contacting Gemini: {type(e).__name__} - {e}")
+          ^^^^^^^^^^^^^^^^
+AttributeError: 'Context' object has no attribute 'followup'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/discord/ext/commands/hybrid.py", line 450, in _invoke_with_namespace
+    value = await self._do_call(ctx, ctx.kwargs)  # type: ignore
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/discord/app_commands/commands.py", line 876, in _do_call
+    raise CommandInvokeError(self, e) from e
+discord.app_commands.errors.CommandInvokeError: Command 'gemini' raised an exception: AttributeError: 'Context' object has no attribute 'followup'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/discord/ext/commands/hybrid.py", line 450, in _invoke_with_namespace
+    value = await self._do_call(ctx, ctx.kwargs)  # type: ignore
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Library/Frameworks/Python.framework/Versions/3.13/lib/python3.13/site-packages/discord/app_commands/commands.py", line 876, in _do_call
+    raise CommandInvokeError(self, e) from e
+discord.ext.commands.errors.HybridCommandError: Hybrid command raised an error: Command 'gemini' raised an exception: AttributeError: 'Context' object has no attribute 'followup'
+2025-04-09 12:39:31,129:INFO:HecateBot: Executing ask_gpt_cmd with query: mental health
+2025-04-09 12:39:31,131:INFO:HecateBot: Simulating Awesome GPT query: mental health (keyword mode: False)
+2025-04-10 00:53:41,807:INFO:HecateBot: Executing ask_gpt_cmd with query: you there godf?
+2025-04-10 00:53:41,811:INFO:HecateBot: Simulating Awesome GPT query: you there godf? (keyword mode: False)
+2025-04-10 00:55:44,754:INFO:HecateBot: Simulating analyze_system_files command
